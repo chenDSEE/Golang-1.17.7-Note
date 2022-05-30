@@ -392,7 +392,7 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 >
 > 看起来更适合 I/O，采用的是类似于环形 buffer 的思路，核心目的是尽可能减少 IO 的次数，每次 IO 尽可能从内核态多拿一些数据出来
 
-
+- 值得注意的是，bufio package 是应用层的 buf，是在操作系统层之上的！不能把 bufio 直接当成操作系统的 page cache、buffer
 
 
 
@@ -604,6 +604,8 @@ func (b *Reader) Read(p []byte) (n int, err error) {
 
 > - 这是一个比较底层的封装，进一步证明了 bufio.Reader 是采用环形缓冲的实现形式；
 > - `ReadBytes()`, `ReadString()` 会是比较高级的封装形式
+> - `ReadSlice()` 不会发生 copy 行为，而是将底层 Reader.buf 的 slice 暴露给调用者。这时候不能乱动 Reader，不然可能发生数据覆盖。
+> - `ReadBytes()`, `ReadString()` 则会发生 copy 行为。单也正因为 copy 了，所以可以继续操作 Reader 而不影响数据
 
 ```go
 // ReadSlice reads until the first occurrence of delim in the input,
@@ -679,6 +681,146 @@ func (b *Reader) ReadSlice(delim byte) (line []byte, err error) {
 #### method：ReadString(byte)
 
 > 一直读取数据，直到遇上指定的终止符号
+
+
+
+
+
+
+
+### Writer struct
+
+> - 只有当 buf 用完了（万不得已），有大量数据要写入（做一次 IO 性价比足够高）的时候，`bufio.Writer` 才会在内部 method 里面悄咪咪的 `bw.Flush()`
+> - `bufio.Writer.Write()` 可能会耗时比较长，尤其是需要写入的数据很多（这时候一般会直接把数据写入 `bufio.Writer.wr` 去）
+
+```go
+// NewWriterSize returns a new Writer whose buffer has at least the specified
+// size. If the argument io.Writer is already a Writer with large enough
+// size, it returns the underlying Writer.
+func NewWriterSize(w io.Writer, size int) *Writer {
+	// Is it already a Writer?
+	b, ok := w.(*Writer)
+	if ok && len(b.buf) >= size {
+        // 防止套娃
+		return b
+	}
+	if size <= 0 {
+		size = defaultBufSize
+	}
+	return &Writer{
+		buf: make([]byte, size),
+		wr:  w,
+	}
+}
+
+// NewWriter returns a new Writer whose buffer has the default size.
+func NewWriter(w io.Writer) *Writer {
+	return NewWriterSize(w, defaultBufSize)
+}
+
+// Writer implements buffering for an io.Writer object.
+// If an error occurs writing to a Writer, no more data will be
+// accepted and all subsequent writes, and Flush, will return the error.
+// 出错了之后，你应当检查完数据之后，再考虑时候能够重新写入
+// After all data has been written, the client should call the
+// Flush method to guarantee all data has been forwarded to
+// the underlying io.Writer.
+// 0 <---> n 已经被 Writer 缓存起来的数据结尾，但是还没有向 io 写入
+// n <---> len(buf) 是还没有被使用的 buf 空间
+type Writer struct {
+	err error
+	buf []byte
+	n   int
+	wr  io.Writer
+}
+```
+
+
+
+
+
+#### method: (*b)Write([]byte)
+
+> 调用完之后，很可能仅仅将数据暂存在 buf 里面，而没有 flush 进 io.Writer 里面，所以必要时是要自己手动 `bufio.Writer.Flush()`
+
+```go
+// Write writes the contents of p into the buffer.
+// It returns the number of bytes written.
+// If nn < len(p), it also returns an error explaining
+// why the write is short.
+func (b *Writer) Write(p []byte) (nn int, err error) {
+	for len(p) > b.Available() && b.err == nil {
+		// case-1: 针对大量数据待 wirte 或 case-2: bufio.Writer.buf 已经没有多少 buffer 空间 时：
+		// Writer 根本装不完要写入的数据，那就直接向 bufio.Writer.wr 写入数据
+		// bufio 的核心是减少 IO 操作的次数。既然数据都多到 bufio.Writer.buf 装不下了，
+		// 那么直接来一次 b.wr.Write(p) 也是相当实惠的一件事，必然是性价比很高的 IO 写入操作
+		var n int
+		if b.Buffered() == 0 {
+			// Large write, empty buffer.
+			// Write directly from p to avoid copy.
+			n, b.err = b.wr.Write(p)
+		} else {
+			// 可能是 case-2: bufio.Writer.buf 已经没有多少 buffer 空间
+			n = copy(b.buf[b.n:], p)
+			b.n += n
+			b.Flush() // 尽可能多 flush 一些数据
+		}
+		nn += n
+		p = p[n:] // 收缩，还剩下这么多数据没有 write
+	}
+	if b.err != nil {
+		return nn, b.err
+	}
+
+	// 只有少量数据需要 write 时：
+	// 显然是暂缓 flush 更为实惠。可以等待 buf 满了之后再 flush，或者是再外面手动调用 bufio.Writer.Flush()
+	n := copy(b.buf[b.n:], p)
+	b.n += n
+	nn += n
+	return nn, nil
+}
+```
+
+
+
+#### method: (*b)Flush()
+
+> 说白了就是调用底层的 `bufio.Writer.wr.Write(bufio.Writer.buf)`
+
+```go
+// Flush writes any buffered data to the underlying io.Writer.
+// 说白了就是调用底层的 bufio.Writer.wr.Write(bufio.Writer.buf)
+func (b *Writer) Flush() error {
+	if b.err != nil {
+		return b.err
+	}
+	if b.n == 0 {
+		return nil
+	}
+	n, err := b.wr.Write(b.buf[0:b.n])
+	if n < b.n && err == nil {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		if n > 0 && n < b.n {
+			// 因为特殊情况，只有部分数据成功写入
+			// 所以只能 copy 一下了
+			copy(b.buf[0:b.n-n], b.buf[n:b.n])
+		}
+		b.n -= n
+		b.err = err
+		return err
+	}
+
+	// 正常情况下，bufio.Writer.buf 的数据都能写进去的
+	b.n = 0 // reset bufio.Writer.buf 重复利用
+	return nil
+}
+```
+
+
+
+
 
 
 

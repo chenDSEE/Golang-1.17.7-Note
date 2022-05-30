@@ -591,9 +591,12 @@ func (b *Reader) writeBuf(w io.Writer) (int64, error) {
 // Writer implements buffering for an io.Writer object.
 // If an error occurs writing to a Writer, no more data will be
 // accepted and all subsequent writes, and Flush, will return the error.
+// 出错了之后，你应当检查完数据之后，再考虑时候能够重新写入
 // After all data has been written, the client should call the
 // Flush method to guarantee all data has been forwarded to
 // the underlying io.Writer.
+// 0 <---> n 已经被 Writer 缓存起来的数据结尾，但是还没有向 io 写入
+// n <---> len(buf) 是还没有被使用的 buf 空间
 type Writer struct {
 	err error
 	buf []byte
@@ -608,6 +611,7 @@ func NewWriterSize(w io.Writer, size int) *Writer {
 	// Is it already a Writer?
 	b, ok := w.(*Writer)
 	if ok && len(b.buf) >= size {
+		// 防止套娃
 		return b
 	}
 	if size <= 0 {
@@ -636,6 +640,7 @@ func (b *Writer) Reset(w io.Writer) {
 }
 
 // Flush writes any buffered data to the underlying io.Writer.
+// 说白了就是调用底层的 bufio.Writer.wr.Write(bufio.Writer.buf)
 func (b *Writer) Flush() error {
 	if b.err != nil {
 		return b.err
@@ -649,13 +654,17 @@ func (b *Writer) Flush() error {
 	}
 	if err != nil {
 		if n > 0 && n < b.n {
+			// 因为特殊情况，只有部分数据成功写入
+			// 所以只能 copy 一下了
 			copy(b.buf[0:b.n-n], b.buf[n:b.n])
 		}
 		b.n -= n
 		b.err = err
 		return err
 	}
-	b.n = 0
+
+	// 正常情况下，bufio.Writer.buf 的数据都能写进去的
+	b.n = 0 // reset bufio.Writer.buf 重复利用
 	return nil
 }
 
@@ -671,22 +680,30 @@ func (b *Writer) Buffered() int { return b.n }
 // why the write is short.
 func (b *Writer) Write(p []byte) (nn int, err error) {
 	for len(p) > b.Available() && b.err == nil {
+		// case-1: 针对大量数据待 wirte 或 case-2: bufio.Writer.buf 已经没有多少 buffer 空间 时：
+		// Writer 根本装不完要写入的数据，那就直接向 bufio.Writer.wr 写入数据
+		// bufio 的核心是减少 IO 操作的次数。既然数据都多到 bufio.Writer.buf 装不下了，
+		// 那么直接来一次 b.wr.Write(p) 也是相当实惠的一件事，必然是性价比很高的 IO 写入操作
 		var n int
 		if b.Buffered() == 0 {
 			// Large write, empty buffer.
 			// Write directly from p to avoid copy.
 			n, b.err = b.wr.Write(p)
 		} else {
+			// 可能是 case-2: bufio.Writer.buf 已经没有多少 buffer 空间
 			n = copy(b.buf[b.n:], p)
 			b.n += n
-			b.Flush()
+			b.Flush() // 尽可能多 flush 一些数据
 		}
 		nn += n
-		p = p[n:]
+		p = p[n:] // 收缩，还剩下这么多数据没有 write
 	}
 	if b.err != nil {
 		return nn, b.err
 	}
+
+	// 只有少量数据需要 write 时：
+	// 显然是暂缓 flush 更为实惠。可以等待 buf 满了之后再 flush，或者是再外面手动调用 bufio.Writer.Flush()
 	n := copy(b.buf[b.n:], p)
 	b.n += n
 	nn += n
@@ -743,6 +760,8 @@ func (b *Writer) WriteRune(r rune) (size int, err error) {
 func (b *Writer) WriteString(s string) (int, error) {
 	nn := 0
 	for len(s) > b.Available() && b.err == nil {
+		// case-1: buf 装不下的话;
+		// case-2: buf 已经满了的话
 		n := copy(b.buf[b.n:], s)
 		b.n += n
 		nn += n
