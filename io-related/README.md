@@ -1,4 +1,12 @@
-![img](v2-b991069b2b903b984364ee48bb86b8bb_720w.jpg)
+> Reference:
+>
+> https://medium.com/@matryer/golang-advent-calendar-day-seventeen-io-reader-in-depth-6f744bb4320b
+>
+> https://colobu.com/2016/10/12/go-file-operations/
+
+
+
+![img](5be284d1a180606d5e6743315f4fbda0.png)
 
 
 
@@ -47,6 +55,7 @@
 // nothing happened; in particular it does not indicate EOF.
 //
 // Implementations must not retain p.
+// 具体的 block 与否，取决于实现，而不是被 interface 绑死
 type Reader interface {
 	Read(p []byte) (n int, err error)
 }
@@ -73,6 +82,102 @@ type Writer interface {
 	Write(p []byte) (n int, err error)
 }
 ```
+
+
+
+
+
+### io.Copy(dst Writer, src Reader)
+
+> - 当 `dst` 实现了 `io.ReaderFrom`, 能够直接将数据从 `io.Reader` 搬运到自己内部。
+>
+> - 当 `src` 实现了 `io.WriterTo`, 能够直接将自己的数据搬运到 `io.Writer` 里面去。
+>
+> 上面两种情况都可以避免不必要的中间拷贝的。
+>
+> 否则这玩意将会非常慢，因为需要中间额外 copy 了一次数据.
+
+```go
+// Copy copies from src to dst until either EOF is reached
+// on src or an error occurs. It returns the number of bytes
+// copied and the first error encountered while copying, if any.
+//
+// A successful Copy returns err == nil, not err == EOF.
+// Because Copy is defined to read from src until EOF, it does
+// not treat an EOF from Read as an error to be reported.
+//
+// 加速 FAST PATH:
+// If src implements the WriterTo interface,
+// the copy is implemented by calling src.WriteTo(dst).
+// Otherwise, if dst implements the ReaderFrom interface,
+// the copy is implemented by calling dst.ReadFrom(src).
+func Copy(dst Writer, src Reader) (written int64, err error) {
+	return copyBuffer(dst, src, nil)
+}
+
+
+// copyBuffer is the actual implementation of Copy and CopyBuffer.
+// if buf is nil, one is allocated.
+func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
+	/* 要是前面这两个 interface 接口断言都失败的话，io.Copy 将会非常慢 */
+	// If the reader has a WriteTo method, use it to do the copy.
+	// Avoids an allocation and a copy.
+	if wt, ok := src.(WriterTo); ok {
+		// fast path for src.(io.WriterTo)
+		return wt.WriteTo(dst)
+	}
+	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
+	if rt, ok := dst.(ReaderFrom); ok {
+		// fast path for dst.(io.ReaderFrom)
+		return rt.ReadFrom(src)
+	}
+
+	// slow path, 不得不创建临时的中间 buf，避免 write 失败的情况
+	if buf == nil {
+		size := 32 * 1024
+		if l, ok := src.(*LimitedReader); ok && int64(size) > l.N {
+			if l.N < 1 {
+				size = 1
+			} else {
+				size = int(l.N)
+			}
+		}
+		buf = make([]byte, size)
+	}
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = errInvalidWrite
+				}
+			}
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != EOF {
+				err = er
+			}
+			break
+		}
+	}
+	return written, err
+}
+```
+
+
+
+
 
 
 
@@ -119,10 +224,12 @@ type RuneReader interface {
 
 ### io.ReaderFrom
 
-> object 能够从另一个 io.Reader 中读取数据，具体类型取决于实现
+> receiver 能够将数据从 io.Reader 搬运到到自己内部，具体类型取决于实现
 >
 > - 一次性全部读取（`bytes.Buffer`）
 > - stream 式读取
+
+![io-write-date](io-write-date.png)
 
 ```go
 // ReaderFrom is the interface that wraps the ReadFrom method.
@@ -148,6 +255,10 @@ type ReaderFrom interface {
 ### io.WriterTo
 
 > 跟 `io.ReaderFrom` 十分类似，是搭配 `io.Writer` 使用的
+>
+> receiver 能够直接将自己的数据搬运到另一个 `io.Writer`
+
+![io-read-date](io-read-date.png)
 
 ```go
 // WriterTo is the interface that wraps the WriteTo method.
@@ -168,9 +279,9 @@ type WriterTo interface {
 
 
 
-## 具体实现 package
+# 具体实现 package
 
-### bytes.Buffer
+## bytes.Buffer
 
 ```go
 // byte.Buffer 的整个抽象是：我不想管要怎么维护底层 buf 的 size，
@@ -199,9 +310,11 @@ type Buffer struct {
 
 
 
-#### ReadFrom()
+### ReadFrom()
 
 > 适合一次性读取全部数据，而不是永不停歇的 stream 读取
+>
+> 将数据从 `io.Reader` 中搬运到 receiver（也就是 `bytes.Buffer`） 内部
 
 ```go
 // ReadFrom reads data from r until EOF and appends it to the buffer, growing
@@ -236,7 +349,9 @@ func (b *Buffer) ReadFrom(r io.Reader) (n int64, err error) {
 
 
 
-#### WriteTo()
+### WriteTo()
+
+> 将数据直接从 receiver（也就是 `bytes.Buffer`）内部搬运到 `io.Reader` 中
 
 ```go
 // WriteTo writes data to w until the buffer is drained or an error occurs.
@@ -271,6 +386,11 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 
 
 
+## bufio
+
+> 针对原始的 io 套一层 buffer，外界可以直接使用 `bufio.Reader` struct, `bufio.Writer` struct。
+>
+> 看起来更适合 I/O，采用的是类似于环形 buffer 的思路，核心目的是尽可能减少 IO 的次数，每次 IO 尽可能从内核态多拿一些数据出来
 
 
 
@@ -278,10 +398,287 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 
 
 
+### Reader struct
+
+> Reader 是一个数据源，从 Reader 里面读取数据
+
+```go
+// 针对 io.Reader 外挂一个 slice 作为 buffer
+// NewReader returns a new Reader whose buffer has the default size.
+func NewReader(rd io.Reader) *Reader {
+    // defaultBufSize = 4 KB
+	return NewReaderSize(rd, defaultBufSize)
+}
+
+// NewReaderSize returns a new Reader whose buffer has at least the specified
+// size. If the argument io.Reader is already a Reader with large enough
+// size, it returns the underlying Reader.
+func NewReaderSize(rd io.Reader, size int) *Reader {
+	// Is it already a Reader?
+	b, ok := rd.(*Reader)
+	if ok && len(b.buf) >= size {
+		return b
+	}
+	if size < minReadBufferSize {
+		size = minReadBufferSize
+	}
+	r := new(Reader)
+	r.reset(make([]byte, size), rd)
+	return r
+}
+
+// Reader implements buffering for an io.Reader object.
+// 针对 io.Reader 外挂一个 slice 作为 buffer
+// buf 作为环形缓冲，重复利用
+// Reader.buf[start <--> r <--> w <--> len(Reader.buf) <--> cap(Reader.buf)]
+// start           <--> r              : 已经读取完毕的数据
+// r               <--> w              : 尚未被取走的数据
+// w               <--> len(Reader.buf): 还可写入多少数据
+// len(Reader.buf) <--> cap(Reader.buf): 还可以扩容收纳多少数据
+type Reader struct {
+	buf          []byte
+	rd           io.Reader // reader provided by the client
+	r, w         int       // buf read and write positions
+	err          error
+	lastByte     int // last byte read for UnreadByte; -1 means invalid
+	lastRuneSize int // size of last rune read for UnreadRune; -1 means invalid
+}
+
+
+```
+
+- 作为一个名为 Reader 的 struct，没有必要提供写入数据能力。这也是为何 `bufio.Reader struct` 并没有实现 `io.ReaderFrom interface`，但是实现了 `io.WriterTo interface` 的原因
+
+
+
+#### bufio.Reader 什么时候填充 buf 的？
+
+要么是 `bufio.Reader` 被读取的时候，顺便去拉取数据（调用 `bufio.Reader.fill()`  或者是直接去 `io.Reader.Read()` 中读取），读不完的暂时放到 buf 中。buf 的存在，是可以有效减少进入内核态次数的。
+
+但你 bufio 里面囤积太多数据没有读取的话，则不会进入内核态拿新的数据（避免浪费内存）
+
+对于 TCP 而言，内核态囤积太多数据是你 APP 代码写的有问题，或者是系统负载太大了，而不能责怪 bufio package
+
+```go
+// fill reads a new chunk into the buffer.
+// 要是还有未读取数据就调用 b.fill() 的话，将会引起内存拷贝（理应由程序员根据实际场合选择）
+func (b *Reader) fill() {
+	// Slide existing data to beginning.
+	if b.r > 0 {
+		// 整理 b.buf，以便填装更多的数据
+		copy(b.buf, b.buf[b.r:b.w])
+		b.w -= b.r
+		b.r = 0
+	}
+
+	if b.w >= len(b.buf) {
+		panic("bufio: tried to fill full buffer")
+	}
+
+	// Read new data: try a limited number of times.
+	for i := maxConsecutiveEmptyReads; i > 0; i-- {
+		// 使用底层 Reader 进行 Read，并且暂存在 bufio.buf 里面
+		n, err := b.rd.Read(b.buf[b.w:])
+		if n < 0 {
+			panic(errNegativeRead)
+		}
+		b.w += n
+		if err != nil {
+			b.err = err
+			return
+		}
+		if n > 0 {
+			return
+		}
+	}
+	b.err = io.ErrNoProgress
+}
+```
 
 
 
 
+
+#### bufio.Reader 内存管理
+
+- `bufio.Reader` 倾向于复用 `bufio.buf`，而不是重新申请一块新的 slice，旧的 buffer 让 GC 去回收
+- 类似于环形 buffer 的思路
+
+```go
+func (b *Reader) Read(p []byte) (n int, err error) {
+    ......
+    if b.r == b.w {
+        ......
+        // 内存管理的核心，重新用回 Reader.buf
+        b.r = 0
+        b.w = 0
+        ......
+    }
+
+    ......
+}
+```
+
+
+
+
+
+#### method: (*b)Read([]byte)
+
+> 从 Reader.buf 里面拉取数据到 `p` 里面
+
+```go
+// Read reads data into p.
+// It returns the number of bytes read into p.
+// The bytes are taken from at most one Read on the underlying Reader,
+// hence n may be less than len(p).
+// To read exactly len(p) bytes, use io.ReadFull(b, p).
+// At EOF, the count will be zero and err will be io.EOF.
+func (b *Reader) Read(p []byte) (n int, err error) {
+	n = len(p)
+	if n == 0 {
+		// 容错设计，不影响核心功能
+		if b.Buffered() > 0 {
+			return 0, nil
+		}
+		return 0, b.readErr()
+	}
+	if b.r == b.w {
+		// Reader 里面全部的数据都已经被读走了
+		// 具体会不会 block 等待，取决于对应 io.Reader 的实现
+		// 虽然 io.Reader 约定是不 block 的
+		if b.err != nil {
+			return 0, b.readErr()
+		}
+		if len(p) >= len(b.buf) {
+			// Large read, empty buffer.
+			// Read directly into p to avoid copy. 而且还剩去了 buf grow 的开销
+			n, b.err = b.rd.Read(p)
+			if n < 0 {
+				panic(errNegativeRead)
+			}
+			if n > 0 {
+				b.lastByte = int(p[n-1])
+				b.lastRuneSize = -1
+			}
+			return n, b.readErr()
+		}
+		// 常规一次性读取，io --> bufio
+		// One read.
+		// Do not use b.fill, which will loop.
+		// 内存管理的核心，重新用回 Reader.buf
+		// 而不是像 bytes.Buffer 那样让 GC 去回收内存
+		b.r = 0
+		b.w = 0
+		n, b.err = b.rd.Read(b.buf)
+		if n < 0 {
+			panic(errNegativeRead)
+		}
+		if n == 0 {
+			return 0, b.readErr()
+		}
+		b.w += n
+	}
+	/*
+	else {
+	    还有数据没有拿走，不进内核态读新的数据
+	    尽可能减少 io 次数
+	}
+	 */
+
+	// copy as much as we can
+	// bufio --> p
+	n = copy(p, b.buf[b.r:b.w])
+	b.r += n
+	b.lastByte = int(b.buf[b.r-1])
+	b.lastRuneSize = -1
+	return n, nil
+}
+```
+
+
+
+
+
+#### method: (*b)ReadSlice(delim byte) (line []byte, err error)
+
+> - 这是一个比较底层的封装，进一步证明了 bufio.Reader 是采用环形缓冲的实现形式；
+> - `ReadBytes()`, `ReadString()` 会是比较高级的封装形式
+
+```go
+// ReadSlice reads until the first occurrence of delim in the input,
+// returning a slice pointing at the bytes in the buffer.
+// The bytes stop being valid at the next read.
+// 要是在整个 buf 里面都找不到 delim 的话，将会返回 bufio.ErrBufferFull
+// bufio.Reader.ReadSlice() 可以再一次读取的，前提是不覆盖未读数据
+// If ReadSlice encounters an error before finding a delimiter,
+// it returns all the data in the buffer and the error itself (often io.EOF).
+// ReadSlice fails with error ErrBufferFull if the buffer fills without a delim.
+// Because the data returned from ReadSlice will be overwritten
+// by the next I/O operation, most clients should use
+// ReadBytes or ReadString instead.
+// ReadSlice returns err != nil if and only if line does not end in delim.
+func (b *Reader) ReadSlice(delim byte) (line []byte, err error) {
+	s := 0 // search start index
+	for { // 再次进入这个 for-loop 的前提是：b.buf 后面还可以在填充数据
+		// Search buffer.
+		if i := bytes.IndexByte(b.buf[b.r+s:b.w], delim); i >= 0 {
+			// 成功找到了 delim，返回一个新的切片出去，同时将数据标记为已读
+			i += s
+			line = b.buf[b.r : b.r+i+1]
+			b.r += i + 1
+			break
+		}
+
+		// Pending error?
+		if b.err != nil {
+			line = b.buf[b.r:b.w]
+			b.r = b.w
+			err = b.readErr()
+			break
+		}
+
+		// Buffer full?
+		if b.Buffered() >= len(b.buf) {
+			b.r = b.w
+			line = b.buf
+			err = ErrBufferFull
+			break
+		}
+
+		s = b.w - b.r // do not rescan area we scanned before
+
+		// 可以再一次读取的，前提是不覆盖未读数据
+		// 每次 b.fill() 在没有数据可以读的时候，会比较消耗 CPU
+		// 所以 b.fill() 的调用实际应当是上层封装者进行设计的
+		b.fill() // buffer is not full
+	}
+
+	// Handle last byte, if any. 如果有输出数据的话
+	if i := len(line) - 1; i >= 0 {
+		b.lastByte = int(line[i])
+		b.lastRuneSize = -1
+	}
+
+	return
+}
+```
+
+
+
+
+
+
+
+#### method: (*b)ReadBytes(byte)
+
+> 一直读取数据，直到遇上指定的终止符号
+
+
+
+#### method：ReadString(byte)
+
+> 一直读取数据，直到遇上指定的终止符号
 
 
 

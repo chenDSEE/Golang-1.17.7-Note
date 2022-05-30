@@ -83,6 +83,7 @@ var ErrNoProgress = errors.New("multiple Read calls return no data or error")
 // 所以你不能直接 append 诞生一个新的 slice，调用者压根没办法拿到这个 Read() 内部新生成的 slice
 // 读到数据就返回，哪怕没有读满 len(p), 毕竟长时间 block 是个大问题
 // 用法类型：1. 一次性全部读取 2. stream 式读取
+// 具体的 block 与否，取决于实现，而不是被 interface 绑死
 type Reader interface {
 	Read(p []byte) (n int, err error)
 }
@@ -406,15 +407,20 @@ func CopyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 // copyBuffer is the actual implementation of Copy and CopyBuffer.
 // if buf is nil, one is allocated.
 func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
+	/* 要是前面这两个 interface 接口断言都失败的话，io.Copy 将会非常慢 */
 	// If the reader has a WriteTo method, use it to do the copy.
 	// Avoids an allocation and a copy.
 	if wt, ok := src.(WriterTo); ok {
+		// fast path for src.(io.WriterTo)
 		return wt.WriteTo(dst)
 	}
 	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
 	if rt, ok := dst.(ReaderFrom); ok {
+		// fast path for dst.(io.ReaderFrom)
 		return rt.ReadFrom(src)
 	}
+
+	// slow path, 不得不创建临时的中间 buf，避免 write 失败的情况
 	if buf == nil {
 		size := 32 * 1024
 		if l, ok := src.(*LimitedReader); ok && int64(size) > l.N {

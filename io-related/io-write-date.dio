@@ -1,0 +1,63 @@
+<mxfile host="65bd71144e">
+    <diagram id="GnCvBVxhn6OVc-qlPrW0" name="Page-1">
+        <mxGraphModel dx="990" dy="575" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="6" style="edgeStyle=none;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="7" target="10">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="7" value="io.Writer" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=20;" vertex="1" parent="1">
+                    <mxGeometry x="40" y="165" width="120" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="8" value="Data-Buf" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontStyle=1;fontSize=20;" vertex="1" parent="1">
+                    <mxGeometry x="714" y="310" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="9" style="edgeStyle=none;html=1;entryX=0.557;entryY=-0.003;entryDx=0;entryDy=0;entryPerimeter=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="10" target="8">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="770" y="180"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="10" value="&lt;b&gt;io.Wrtier.&lt;font color=&quot;#3333ff&quot;&gt;Write&lt;/font&gt;(Data-Buf)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=20;strokeWidth=2;" vertex="1" parent="1">
+                    <mxGeometry x="264" y="150" width="300" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="11" style="edgeStyle=none;html=1;entryX=0.558;entryY=1.006;entryDx=0;entryDy=0;entryPerimeter=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="12" target="8">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="770" y="470"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="12" value="&lt;b&gt;io.Reader.&lt;font color=&quot;#3333ff&quot;&gt;ReadFrom&lt;/font&gt;(Data-Buf)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=20;strokeWidth=2;" vertex="1" parent="1">
+                    <mxGeometry x="211" y="440" width="406" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="13" style="edgeStyle=none;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="14" target="12">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="14" value="io.ReaderFrom" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=20;" vertex="1" parent="1">
+                    <mxGeometry x="25" y="455" width="150" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="15" style="edgeStyle=none;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="17" target="7">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="16" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;startArrow=classic;startFill=1;endArrow=none;endFill=0;" edge="1" parent="1" source="17" target="14">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="17" value="bufio.Writer&amp;nbsp;&amp;nbsp;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=20;" vertex="1" parent="1">
+                    <mxGeometry x="30" y="310" width="140" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="18" value="数据&lt;font color=&quot;#ff0000&quot;&gt;被&lt;/font&gt;写入到 receiver&amp;nbsp;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=17;fontStyle=1" vertex="1" parent="1">
+                    <mxGeometry x="309.25" y="210" width="191.5" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="19" value="receiver &lt;font color=&quot;#ff0000&quot;&gt;主动&lt;/font&gt;从 buf 读取数据" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=17;fontStyle=1" vertex="1" parent="1">
+                    <mxGeometry x="290" y="410" width="230" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="20" value="可以将数据写入 bufio.Writer 中" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontColor=#3333FF;fontStyle=1" vertex="1" parent="1">
+                    <mxGeometry x="160" y="310" width="240" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
