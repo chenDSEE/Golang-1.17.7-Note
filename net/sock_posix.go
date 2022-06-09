@@ -17,7 +17,10 @@ import (
 // socket returns a network file descriptor that is ready for
 // asynchronous I/O using the network poller.
 func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlFn func(string, string, syscall.RawConn) error) (fd *netFD, err error) {
-	s, err := sysSocket(family, sotype, proto) // centos 7 的话，会走 src/net/sock_cloexec.go:sysSocket()
+	// TCP 的话，family = 2 (syscall.AF_INET), proto = 0, sotype = 1 (syscall.SOCK_STREAM)
+	// 1. centos 7 的话，会走 src/net/sock_cloexec.go:sysSocket()
+	// 2. 再走 hook_unix.go:syscall.Socket()
+	s, err := sysSocket(family, sotype, proto)
 	if err != nil {
 		return nil, err
 	}
@@ -55,6 +58,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	if laddr != nil && raddr == nil {
 		switch sotype {
 		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
+			// 完成 bind + listen
 			if err := fd.listenStream(laddr, listenerBacklog(), ctrlFn); err != nil {
 				fd.Close()
 				return nil, err

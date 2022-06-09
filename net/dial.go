@@ -205,6 +205,7 @@ func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet s
 // resolveAddrList resolves addr using hint and returns a list of
 // addresses. The result contains at least one address when error is
 // nil.
+// 必要时甚至会进行 DNS 解析
 func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (addrList, error) {
 	afnet, _, err := parseNetwork(ctx, network, true)
 	if err != nil {
@@ -644,6 +645,7 @@ func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Li
 	la := addrs.first(isIPv4) // 执行 isIPv4() 的检查，找出第一个满足条件的地址
 	switch la := la.(type) {
 	case *TCPAddr:
+		// 创建一个 TCP 的 socket，并 bind、listen
 		l, err = sl.listenTCP(ctx, la)
 	case *UnixAddr:
 		l, err = sl.listenUnix(ctx, la)
