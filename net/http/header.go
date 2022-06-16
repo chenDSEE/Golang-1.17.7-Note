@@ -188,21 +188,33 @@ func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *h
 // If exclude is not nil, keys where exclude[key] == true are not written.
 // Keys are not canonicalized before checking the exclude map.
 func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
+	// w = http.response.conn.bufw
 	return h.writeSubset(w, exclude, nil)
 }
 
 func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptrace.ClientTrace) error {
+	// w = http.response.conn.bufw
 	ws, ok := w.(io.StringWriter)
 	if !ok {
 		ws = stringWriter{w}
 	}
-	kvs, sorter := h.sortedKeyValues(exclude)
+
+	/* kvs []keyValues
+	 * type keyValues struct {
+	 *     key    string
+	 *     values []string
+	 * }
+	 */
+	kvs, sorter := h.sortedKeyValues(exclude) // 从 h 中剔除 exclude 的 Header
 	var formattedVals []string
-	for _, kv := range kvs {
-		for _, v := range kv.values {
+	for _, kv := range kvs { // 取出每一个 keyValues struct
+		for _, v := range kv.values { // 取出每一个 keyValues.values string
 			v = headerNewlineToSpace.Replace(v)
 			v = textproto.TrimString(v)
 			for _, s := range []string{kv.key, ": ", v, "\r\n"} {
+				// 每一个 Header value 用一个单独的 Header key 发出去
+				// Host: xxx.xxx.xxx1
+				// Host: xxx.xxx.xxx2 这样
 				if _, err := ws.WriteString(s); err != nil {
 					headerSorterPool.Put(sorter)
 					return err

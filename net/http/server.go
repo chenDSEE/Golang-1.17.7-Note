@@ -434,7 +434,7 @@ func (cw *chunkWriter) close() {
 
 // A response represents the server side of an HTTP response.
 type response struct {
-	conn             *conn
+	conn             *conn // socket 的 bufio 在这里
 	req              *Request // request for this response
 	reqBody          io.ReadCloser
 	cancelCtx        context.CancelFunc // when ServeHTTP exits
@@ -453,17 +453,18 @@ type response struct {
 	canWriteContinue atomicBool
 	writeContinueMu  sync.Mutex
 
+	
 	// w 是裹上 bufio 的 cw, 而 cw 则是一个转接到 http.conn 的桥梁，以及格式转换器
 	// net.http.response.w = newBufioWriterSize(&cw)
 	// cw 并没有 socket fd，仅仅是通过指针的方式，去访问原本 http.conn 中的 socket
-	w  *bufio.Writer // buffers output in chunks to chunkWriter
-	cw chunkWriter
+	w  *bufio.Writer // buffers output in chunks to chunkWriter，业务层 buffer
+	cw chunkWriter   // 协议序列化 Writer
 
 	// handlerHeader is the Header that Handlers get access to,
 	// which may be retained and mutated even after WriteHeader.
 	// handlerHeader is copied into cw.header at WriteHeader
 	// time, and privately mutated thereafter.
-	handlerHeader Header
+	handlerHeader Header // 业务层 buffer
 	calledHeader  bool // handler accessed handlerHeader via Header
 
 	written       int64 // number of bytes written in body
@@ -1168,7 +1169,7 @@ func (w *response) WriteHeader(code int) {
 	}
 	checkWriteHeaderCode(code) // 填了不满足 RFC 的 status code 时，直接 panic 这一个 goroutine
 	w.wroteHeader = true       // 打上标记，不能再发 Header 了
-	w.status = code            // 暂时记录起来，晚点由 chunkWriter 负责编码进去
+	w.status = code            // 暂时记录起来，晚点由 chunkWriter.Write() 负责编码进去 conn.bufw 里面
 
 	if w.calledHeader && w.cw.header == nil {
 		// TODO: 为什么要 clone 进去 cw ？
@@ -1215,7 +1216,9 @@ var (
 // This method has a value receiver, despite the somewhat large size
 // of h, because it prevents an allocation. The escape analysis isn't
 // smart enough to realize this function doesn't mutate h.
+// 非常朴素的字符串写入
 func (h extraHeader) Write(w *bufio.Writer) {
+	// w = http.response.conn.bufw
 	if h.date != nil {
 		w.Write(headerDate)
 		w.Write(h.date)
@@ -1259,6 +1262,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	keepAlivesEnabled := w.conn.server.doKeepAlives()
 	isHEAD := w.req.Method == "HEAD"
 
+	/* 创建辅助的：excludeHeader map + extraHeader map */
 	// header is written out to w.conn.buf below. Depending on the
 	// state of the handler, we either own the map or not. If we
 	// don't own it, the exclude map is created lazily for
@@ -1271,6 +1275,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 	var excludeHeader map[string]bool // 哪些 Header 是剔除掉，不发的
 	delHeader := func(key string) {
+		// 利用这个闭包来删除不要的 Header
 		if owned {
 			header.Del(key)
 			return
@@ -1285,6 +1290,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 	var setHeader extraHeader // 有哪些 Header 要补充，通常是 chunkWriter 补充的
 
+	/* 根据 RFC, request-Method + request-body + response-body 组织 response 的 Header、status code */
 	/* Trailer 这个 Header 相关的处理 */
 	// Don't write out the fake "Trailer:foo" keys. See TrailerPrefix.
 	trailers := false
@@ -1518,6 +1524,8 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
 
 	/* 写入 Header */
+	// cw.header 本身就记录了 Serve HTTP() 想要设置的 Header
+	// excludeHeader 则是要剔除的 Header
 	cw.header.WriteSubset(w.conn.bufw, excludeHeader)
 	setHeader.Write(w.conn.bufw)
 
@@ -1548,6 +1556,8 @@ func foreachHeaderElement(v string, fn func(string)) {
 // code is the response status code.
 // scratch is an optional scratch buffer. If it has at least capacity 3, it's used.
 func writeStatusLine(bw *bufio.Writer, is11 bool, code int, scratch []byte) {
+	// bw = http.response.conn.bufw, code 就是要填写的 status code
+	// 都是往 bw.buf 里面放数据，所以多次 write 也没关系，反正挺快的
 	if is11 {
 		bw.WriteString("HTTP/1.1 ")
 	} else {

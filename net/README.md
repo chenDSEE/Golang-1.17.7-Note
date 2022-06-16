@@ -2530,7 +2530,7 @@ type ResponseWriter interface {
 
 // A response represents the server side of an HTTP response.
 type response struct {
-	conn             *conn
+	conn             *conn // socket 的 bufio 在这里
 	req              *Request // request for this response
 	reqBody          io.ReadCloser
 	cancelCtx        context.CancelFunc // when ServeHTTP exits
@@ -2552,14 +2552,14 @@ type response struct {
     // w 是裹上 bufio 的 cw, 而 cw 则是
 	// net.http.response.w = newBufioWriterSize(&cw)
 	// cw 并没有 socket fd，仅仅是通过指针的方式，去访问原本 http.conn 中的 socket
-	w  *bufio.Writer // buffers output in chunks to chunkWriter
-	cw chunkWriter
+	w  *bufio.Writer // buffers output in chunks to chunkWriter，业务层 buffer
+	cw chunkWriter   // 协议序列化 Writer
 
 	// handlerHeader is the Header that Handlers get access to,
 	// which may be retained and mutated even after WriteHeader.
 	// handlerHeader is copied into cw.header at WriteHeader
 	// time, and privately mutated thereafter.
-	handlerHeader Header
+	handlerHeader Header // 业务层 buffer
 	calledHeader  bool // handler accessed handlerHeader via Header
 
 	written       int64 // number of bytes written in body
@@ -2681,7 +2681,7 @@ func (w *response) WriteHeader(code int) {
 	}
 	checkWriteHeaderCode(code) // 填了不满足 RFC 的 status code 时，直接 panic 这一个 goroutine
 	w.wroteHeader = true       // 打上标记，不能再发 Header 了
-	w.status = code            // 暂时记录起来，晚点由 chunkWriter 负责编码进去
+    w.status = code            // 暂时记录起来，晚点由 chunkWriter.Write() 负责编码进去 conn.bufw 里面
 
 	.........
 }
@@ -2694,12 +2694,9 @@ func (w *response) WriteHeader(code int) {
 
 - Header 的编码，实际上是可能有两个触发路径的:
   - **路径一：**在 `http.response.finishRequest()` 通过 `http.response.w.Flush()`, 将数据刷到 socket 的 bufio 里面
-  - **路径二：**
+  - **路径二：**`ServeHTTP()` 在不停的往 `http.ResponseWriter.Write()` write 数据，导致 `http.response.w` 这个 buffer 满了，进而触发底层的 `http.response.cw` 向 `http.response.conn.bufw` 刷写数据
 
-
-
-
-**路径一：**
+两个路径殊途同归，都是来到 `http.chunkWriter.Write()` 上
 
 ```go
 bufio.Writer 会通过 bufio.Flush() 调用底层裸 IO 的 Write(), 也就是下面的这个函数
@@ -2740,13 +2737,9 @@ func (cw *chunkWriter) Write(p []byte) (n int, err error) {
 
 // writeHeader finalizes the header sent to the client and writes it
 // to cw.res.conn.bufw.
-//
-// p is not written by writeHeader, but is the first chunk of the body
-// that will be written. It is sniffed for a Content-Type if none is
-// set explicitly. It's also used to set the Content-Length, if the
-// total body size was small and the handler has already finished
-// running.
 func (cw *chunkWriter) writeHeader(p []byte) {
+	// p 实际上是 chunkWriter 外面的 bufio.buf 的数据
+	// 在 HTTP 的场景下，就是 ServeHTTP() 中向 http.ResponseWriter.Write() 的数据
 	if cw.wroteHeader {
 		return
 	}
@@ -2756,6 +2749,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	keepAlivesEnabled := w.conn.server.doKeepAlives()
 	isHEAD := w.req.Method == "HEAD"
 
+	/* 创建辅助的：excludeHeader map + extraHeader map */
 	// header is written out to w.conn.buf below. Depending on the
 	// state of the handler, we either own the map or not. If we
 	// don't own it, the exclude map is created lazily for
@@ -2782,253 +2776,118 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 	var setHeader extraHeader
 
-	// Don't write out the fake "Trailer:foo" keys. See TrailerPrefix.
-	trailers := false
-	for k := range cw.header {
-		if strings.HasPrefix(k, TrailerPrefix) {
-			if excludeHeader == nil {
-				excludeHeader = make(map[string]bool)
-			}
-			excludeHeader[k] = true
-			trailers = true
-		}
-	}
-	for _, v := range cw.header["Trailer"] {
-		trailers = true
-		foreachHeaderElement(v, cw.res.declareTrailer)
-	}
-
-	te := header.get("Transfer-Encoding")
-	hasTE := te != ""
-
-	// If the handler is done but never sent a Content-Length
-	// response header and this is our first (and last) write, set
-	// it, even to zero. This helps HTTP/1.0 clients keep their
-	// "keep-alive" connections alive.
-	// Exceptions: 304/204/1xx responses never get Content-Length, and if
-	// it was a HEAD request, we don't know the difference between
-	// 0 actual bytes and 0 bytes because the handler noticed it
-	// was a HEAD request and chose not to write anything. So for
-	// HEAD, the handler should either write the Content-Length or
-	// write non-zero bytes. If it's actually 0 bytes and the
-	// handler never looked at the Request.Method, we just don't
-	// send a Content-Length header.
-	// Further, we don't send an automatic Content-Length if they
-	// set a Transfer-Encoding, because they're generally incompatible.
-	if w.handlerDone.isSet() && !trailers && !hasTE && bodyAllowedForStatus(w.status) && header.get("Content-Length") == "" && (!isHEAD || len(p) > 0) {
-		w.contentLength = int64(len(p))
-		setHeader.contentLength = strconv.AppendInt(cw.res.clenBuf[:0], int64(len(p)), 10)
-	}
-
-	// If this was an HTTP/1.0 request with keep-alive and we sent a
-	// Content-Length back, we can make this a keep-alive response ...
-	if w.wants10KeepAlive && keepAlivesEnabled {
-		sentLength := header.get("Content-Length") != ""
-		if sentLength && header.get("Connection") == "keep-alive" {
-			w.closeAfterReply = false
-		}
-	}
-
-	// Check for an explicit (and valid) Content-Length header.
-	hasCL := w.contentLength != -1
-
-	if w.wants10KeepAlive && (isHEAD || hasCL || !bodyAllowedForStatus(w.status)) {
-		_, connectionHeaderSet := header["Connection"]
-		if !connectionHeaderSet {
-			setHeader.connection = "keep-alive"
-		}
-	} else if !w.req.ProtoAtLeast(1, 1) || w.wantsClose {
-		w.closeAfterReply = true
-	}
-
-	if header.get("Connection") == "close" || !keepAlivesEnabled {
-		w.closeAfterReply = true
-	}
-
-	// If the client wanted a 100-continue but we never sent it to
-	// them (or, more strictly: we never finished reading their
-	// request body), don't reuse this connection because it's now
-	// in an unknown state: we might be sending this response at
-	// the same time the client is now sending its request body
-	// after a timeout.  (Some HTTP clients send Expect:
-	// 100-continue but knowing that some servers don't support
-	// it, the clients set a timer and send the body later anyway)
-	// If we haven't seen EOF, we can't skip over the unread body
-	// because we don't know if the next bytes on the wire will be
-	// the body-following-the-timer or the subsequent request.
-	// See Issue 11549.
-	if ecr, ok := w.req.Body.(*expectContinueReader); ok && !ecr.sawEOF.isSet() {
-		w.closeAfterReply = true
-	}
-
-	// Per RFC 2616, we should consume the request body before
-	// replying, if the handler hasn't already done so. But we
-	// don't want to do an unbounded amount of reading here for
-	// DoS reasons, so we only try up to a threshold.
-	// TODO(bradfitz): where does RFC 2616 say that? See Issue 15527
-	// about HTTP/1.x Handlers concurrently reading and writing, like
-	// HTTP/2 handlers can do. Maybe this code should be relaxed?
-	if w.req.ContentLength != 0 && !w.closeAfterReply {
-		var discard, tooBig bool
-
-		switch bdy := w.req.Body.(type) {
-		case *expectContinueReader:
-			if bdy.resp.wroteContinue {
-				discard = true
-			}
-		case *body:
-			bdy.mu.Lock()
-			switch {
-			case bdy.closed:
-				if !bdy.sawEOF {
-					// Body was closed in handler with non-EOF error.
-					w.closeAfterReply = true
-				}
-			case bdy.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
-				tooBig = true
-			default:
-				discard = true
-			}
-			bdy.mu.Unlock()
-		default:
-			discard = true
-		}
-
-		if discard {
-			_, err := io.CopyN(io.Discard, w.reqBody, maxPostHandlerReadBytes+1)
-			switch err {
-			case nil:
-				// There must be even more data left over.
-				tooBig = true
-			case ErrBodyReadAfterClose:
-				// Body was already consumed and closed.
-			case io.EOF:
-				// The remaining body was just consumed, close it.
-				err = w.reqBody.Close()
-				if err != nil {
-					w.closeAfterReply = true
-				}
-			default:
-				// Some other kind of error occurred, like a read timeout, or
-				// corrupt chunked encoding. In any case, whatever remains
-				// on the wire must not be parsed as another HTTP request.
-				w.closeAfterReply = true
-			}
-		}
-
-		if tooBig {
-			w.requestTooLarge()
-			delHeader("Connection")
-			setHeader.connection = "close"
-		}
-	}
-
+	/* 根据 RFC, request-Method + request-body + response-body 组织 response 的 Header、status code */
+	.........
 	code := w.status
-	if bodyAllowedForStatus(code) {
-		// If no content type, apply sniffing algorithm to body.
-		_, haveType := header["Content-Type"]
+	.........
 
-		// If the Content-Encoding was set and is non-blank,
-		// we shouldn't sniff the body. See Issue 31753.
-		ce := header.Get("Content-Encoding")
-		hasCE := len(ce) > 0
-		if !hasCE && !haveType && !hasTE && len(p) > 0 {
-			setHeader.contentType = DetectContentType(p)
-		}
-	} else {
-		for _, k := range suppressedHeaders(code) {
-			delHeader(k)
-		}
-	}
-
-	if !header.has("Date") {
-		setHeader.date = appendTime(cw.res.dateBuf[:0], time.Now())
-	}
-
-	if hasCL && hasTE && te != "identity" {
-		// TODO: return an error if WriteHeader gets a return parameter
-		// For now just ignore the Content-Length.
-		w.conn.server.logf("http: WriteHeader called with both Transfer-Encoding of %q and a Content-Length of %d",
-			te, w.contentLength)
-		delHeader("Content-Length")
-		hasCL = false
-	}
-
-	if w.req.Method == "HEAD" || !bodyAllowedForStatus(code) || code == StatusNoContent {
-		// Response has no body.
-		delHeader("Transfer-Encoding")
-	} else if hasCL {
-		// Content-Length has been provided, so no chunking is to be done.
-		delHeader("Transfer-Encoding")
-	} else if w.req.ProtoAtLeast(1, 1) {
-		// HTTP/1.1 or greater: Transfer-Encoding has been set to identity, and no
-		// content-length has been provided. The connection must be closed after the
-		// reply is written, and no chunking is to be done. This is the setup
-		// recommended in the Server-Sent Events candidate recommendation 11,
-		// section 8.
-		if hasTE && te == "identity" {
-			cw.chunking = false
-			w.closeAfterReply = true
-			delHeader("Transfer-Encoding")
-		} else {
-			// HTTP/1.1 or greater: use chunked transfer encoding
-			// to avoid closing the connection at EOF.
-			cw.chunking = true
-			setHeader.transferEncoding = "chunked"
-			if hasTE && te == "chunked" {
-				// We will send the chunked Transfer-Encoding header later.
-				delHeader("Transfer-Encoding")
-			}
-		}
-	} else {
-		// HTTP version < 1.1: cannot do chunked transfer
-		// encoding and we don't know the Content-Length so
-		// signal EOF by closing connection.
-		w.closeAfterReply = true
-		delHeader("Transfer-Encoding") // in case already set
-	}
-
-	// Cannot use Content-Length with non-identity Transfer-Encoding.
-	if cw.chunking {
-		delHeader("Content-Length")
-	}
-	if !w.req.ProtoAtLeast(1, 0) {
-		return
-	}
-
-	// Only override the Connection header if it is not a successful
-	// protocol switch response and if KeepAlives are not enabled.
-	// See https://golang.org/issue/36381.
-	delConnectionHeader := w.closeAfterReply &&
-		(!keepAlivesEnabled || !hasToken(cw.header.get("Connection"), "close")) &&
-		!isProtocolSwitchResponse(w.status, header)
-	if delConnectionHeader {
-		delHeader("Connection")
-		if w.req.ProtoAtLeast(1, 1) {
-			setHeader.connection = "close"
-		}
-	}
-
+	/* 写入 status line */
 	writeStatusLine(w.conn.bufw, w.req.ProtoAtLeast(1, 1), code, w.statusBuf[:])
+
+	/* 写入 Header */
 	cw.header.WriteSubset(w.conn.bufw, excludeHeader)
 	setHeader.Write(w.conn.bufw)
+
+	/* HTTP 首部结束标识 */
 	w.conn.bufw.Write(crlf)
 }
 
+/* 写入 status line */
+// writeStatusLine writes an HTTP/1.x Status-Line (RFC 7230 Section 3.1.2)
+// to bw. is11 is whether the HTTP request is HTTP/1.1. false means HTTP/1.0.
+// code is the response status code.
+// scratch is an optional scratch buffer. If it has at least capacity 3, it's used.
+func writeStatusLine(bw *bufio.Writer, is11 bool, code int, scratch []byte) {
+	// bw = http.response.conn.bufw, code 就是要填写的 status code
+	// 都是往 bw.buf 里面放数据，所以多次 write 也没关系，反正挺快的
+	if is11 {
+		bw.WriteString("HTTP/1.1 ")
+	} else {
+		bw.WriteString("HTTP/1.0 ")
+	}
+	if text, ok := statusText[code]; ok {
+		bw.Write(strconv.AppendInt(scratch[:0], int64(code), 10))
+		bw.WriteByte(' ')
+		bw.WriteString(text)
+		bw.WriteString("\r\n")
+	} else {
+		// don't worry about performance
+		fmt.Fprintf(bw, "%03d status code %d\r\n", code, code)
+	}
+}
+
+/* 写入 Header */
+net/http/header.go:
+func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptrace.ClientTrace) error {
+	// w = http.response.conn.bufw
+	ws, ok := w.(io.StringWriter)
+	if !ok {
+		ws = stringWriter{w}
+	}
+
+	/* kvs []keyValues
+	 * type keyValues struct {
+	 *     key    string
+	 *     values []string
+	 * }
+	 */
+	kvs, sorter := h.sortedKeyValues(exclude) // 从 h 中剔除 exclude 的 Header
+	var formattedVals []string
+	for _, kv := range kvs { // 取出每一个 keyValues struct
+		for _, v := range kv.values { // 取出每一个 keyValues.values string
+			v = headerNewlineToSpace.Replace(v)
+			v = textproto.TrimString(v)
+			for _, s := range []string{kv.key, ": ", v, "\r\n"} {
+				// 每一个 Header value 用一个单独的 Header key 发出去
+				// Host: xxx.xxx.xxx1
+				// Host: xxx.xxx.xxx2 这样
+				if _, err := ws.WriteString(s); err != nil {
+					headerSorterPool.Put(sorter)
+					return err
+				}
+			}
+			if trace != nil && trace.WroteHeaderField != nil {
+				formattedVals = append(formattedVals, v)
+			}
+		}
+		if trace != nil && trace.WroteHeaderField != nil {
+			trace.WroteHeaderField(kv.key, formattedVals)
+			formattedVals = nil
+		}
+	}
+	headerSorterPool.Put(sorter)
+	return nil
+}
+
+net/http/server.go:
+// Write writes the headers described in h to w.
+//
+// This method has a value receiver, despite the somewhat large size
+// of h, because it prevents an allocation. The escape analysis isn't
+// smart enough to realize this function doesn't mutate h.
+// 非常朴素的字符串写入
+func (h extraHeader) Write(w *bufio.Writer) {
+	// w = http.response.conn.bufw
+	if h.date != nil {
+		w.Write(headerDate)
+		w.Write(h.date)
+		w.Write(crlf)
+	}
+	if h.contentLength != nil {
+		w.Write(headerContentLength)
+		w.Write(h.contentLength)
+		w.Write(crlf)
+	}
+	for i, v := range []string{h.contentType, h.connection, h.transferEncoding} {
+		if v != "" {
+			w.Write(extraHeaderKeys[i])
+			w.Write(colonSpace)
+			w.WriteString(v)
+			w.Write(crlf)
+		}
+	}
+}
 ```
-
-
-
-**路径二：**
-
-```go
-```
-
-
-
-
-
-
 
 
 
@@ -3083,6 +2942,8 @@ type chunkWriter struct {
 }
 
 func (cw *chunkWriter) Write(p []byte) (n int, err error) {
+	// p 实际上是 chunkWriter 外面的 bufio.buf 的数据
+	// 在 HTTP 的场景下，就是 ServeHTTP() 中向 http.ResponseWriter.Write() 的数据
 	if !cw.wroteHeader {
 		// 看，优先帮你把 Header 刷出去
 		cw.writeHeader(p)
@@ -3105,7 +2966,6 @@ func (cw *chunkWriter) Write(p []byte) (n int, err error) {
 	}
 	return
 }
-
 ```
 
 
@@ -3118,7 +2978,28 @@ func (cw *chunkWriter) Write(p []byte) (n int, err error) {
   - `net/http.response.w` 这个裹上了 `bufio.Writer` 的 `net/http.response.cw`
   - `net/http.response.conn.bufw` 这一个裹上了 `bufio.Wirter` 的 socket FD
 
+> **两层 buffer 的定位：**
+>
+> 业务 ---- buffer ----> 网络协议数据 ---- buffer ----> socket FD
+
+
+
+`net/http.response.w`:
+
+- 对于这一层 buffer，一开始我也是觉得很多余的，为什么不直接向 `net/http.response.conn.bufw` 的 buffer 写入？
+- 这一层 buffer 里面记录的实际上是 HTTP 的 body 数据。并不包含 HTTP status line、HTTP Header。
+  - status code 是单独存在一个 int32 变量的；
+  - Header 则是在一个 map 里面。这样才方便后续的增删查改
+- 而且，HTTP 的 Header、status line 不一定是立马就能固定下来的，随着后续数据的写入，会有一定的调整，所以直接根据 HTTP 协议的格式，序列化它们，并放到 `net/http.response.conn.bufw` 不适合
+- 中间这整个 `http.response.w` 是 body 的业务暂存；`http.chunkWriter` + `http.response` 则是 Header 跟 status code 的业务暂存
+  - 业务操作没有完成之前，都是有可能改变 Header、status code 的，所以不适合直接把数据 HTTP 序列化
+
+
+
+`net/http.response.conn.bufw`:
+
 - 首先你要明确，buffer 在 IO 上的作用是：集中进行耗时的 IO 操作，避免频繁而短小的 IO 操作，大量浪费内核态、用户态的切换时间。操作系统中的文件 buffer 就是起了这么个作用。
+- 而给 socket 套上一层 buffer 也是同样的原因。值得注意的是，在这个 buffer 最好是已经完成网络协议编码的数据，而且是顺序也排列好的。到时候当 socket fd 可写的时候，直接从 buffer 拿出来写就完事了，不需要再花时间去做什么网络协议编码
 
 
 
