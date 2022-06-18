@@ -2203,6 +2203,8 @@ func StripPrefix(prefix string, h Handler) Handler {
 		p := strings.TrimPrefix(r.URL.Path, prefix)
 		rp := strings.TrimPrefix(r.URL.RawPath, prefix)
 		if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
+			// 有没必要针对整个 request 进行浅拷贝，确实是值得商榷的
+			// 主要看原本的 r 会不会收到 URL 参数修改的影响
 			r2 := new(Request)
 			*r2 = *r
 			r2.URL = new(url.URL)

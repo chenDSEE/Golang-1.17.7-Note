@@ -42,7 +42,8 @@ func headerControlHandler(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "With status code 202 and Cache-Control Header" + "\n")
 }
 
-// 通过 struct 携带更多的信息
+
+/* 通过 struct 携带更多的信息 */
 /* 因为 object 本身就已经可以很好的命名
  * 所有 object 处理 http 的 method 名字就是 ServeHTTP
  * 不需要额外命名。这是一个面向对象的方案
@@ -56,6 +57,59 @@ func (o *OBJ) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, r.URL.Path+"\n")
 }
 
+/* chaining handler */
+// auditLog() ---> authCheck() ---> chainFunctionHandler()
+// 返回的匿名函数通常都不会里面执行的，就像原本注入的函数一样
+// 因为这个横向函数仅仅是增加了一些横向的东西，所以参数、返回值都是一样的。
+// 怎么进来就怎么出去，不发生丝毫的变化，原本的函数没有任何感知
+
+// Usage case 1: function 包裹
+func auditLog(function http.HandlerFunc) http.HandlerFunc {
+	// 横向观测点不能写在这里，这只会被运行一次的！
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("demo a audit Log. ") // 横向动作
+		function(w, r)                          // 直接转发去原本的函数里面
+	}
+}
+
+func authCheck(function http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("after auth check\n")
+		function(w, r)
+	}
+}
+
+func chainFunctionHandler(w http.ResponseWriter, r *http.Request) {
+	// 看，log 跟 auth 的逻辑可以相互隔离，避免依赖
+	fmt.Printf("[%s]==> chainFunctionHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+	io.WriteString(w, "finish chaining function call\n")
+}
+
+// Usage case 2: object 包裹
+// 因为现在是一个 object 要穿越这些横向拓展，所以参数跟返回值变通一下就是了
+func objAuditLog(obj http.Handler) http.Handler {
+	return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("demo a obejct audit Log. ") // 横向动作
+		obj.ServeHTTP(w, r)
+	})
+}
+
+func objAuthCheck(obj http.Handler) http.Handler {
+	return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("after object auth check\n")
+		obj.ServeHTTP(w, r)
+	})
+}
+
+type chainObj struct {
+	name string
+}
+
+func (obj *chainObj) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> object[%s] chain visit %s\n", r.RemoteAddr, obj.name, r.URL.Path)
+	io.WriteString(w, r.URL.Path+" finish object chain call\n")
+}
+
 /* route version */
 // test case:
 //   curl -i http://localhost:8080/
@@ -64,6 +118,8 @@ func (o *OBJ) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //   curl -i http://localhost:8080/object-example
 //   curl -i http://localhost:8080/bad-example
 //   curl -i http://localhost:8080/header-control
+//   curl -i http://localhost:8080/chaining-function
+//   curl -i http://localhost:8080/chaining-object
 func main() {
 	fmt.Println("====== HTTP Server Start ======")
 
@@ -100,6 +156,22 @@ func main() {
 	// 这种时候，用 http.ServeMux.HandleFunc() 更适合（内置强制转换）
 	// 用 http.ServeMux.Handle() 还得自己手动强制转换
 	mux.Handle("/bad-example", http.HandlerFunc(helperHandler))
+
+	// chaining example, pipeline
+	/* 这种串联方式，实际上是一种横向拓展的方式。
+	 * 优点:
+	 * 不会让没有关联的代码相互依赖：http 的处理逻辑，不用加上 log 的依赖
+	 * 增加横向观察，钩子的时候，不需要改动框架的代码
+	 *
+	 * 缺点:
+	 * 作为横向观察，无法传入、传出额外的参数
+	 *
+	 * 注意，通过返回匿名函数的方式，达到的是从外向内的执行效果。
+	 * 而 C 语言传递回调函数的方式，只能达到从内向外的执行效果
+	 */
+	// chaining-function
+	mux.HandleFunc("/chaining-function", auditLog(authCheck(chainFunctionHandler)))
+	mux.Handle("/chaining-object", objAuditLog(objAuthCheck(&chainObj{"chaining"})))
 
 	// step 2: 启动 http 的监听，并且把这个路由表传递给相应的 TCP server
 	server := &http.Server{Addr: "localhost:8080", Handler: mux}
