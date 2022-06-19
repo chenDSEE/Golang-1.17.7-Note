@@ -453,7 +453,7 @@ type response struct {
 	canWriteContinue atomicBool
 	writeContinueMu  sync.Mutex
 
-	
+
 	// w 是裹上 bufio 的 cw, 而 cw 则是一个转接到 http.conn 的桥梁，以及格式转换器
 	// net.http.response.w = newBufioWriterSize(&cw)
 	// cw 并没有 socket fd，仅仅是通过指针的方式，去访问原本 http.conn 中的 socket
@@ -3023,6 +3023,8 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	}
 
 	// http.ServeMux.ServeHTTP()
+	// 因为原始的 http.Handler 裹上了一层路由转发功能
+	// 所以下一步是去 http.ServeMux.ServeHTTP() 进行路由转发
 	handler.ServeHTTP(rw, req)
 }
 
