@@ -242,6 +242,7 @@ type Request struct {
 	// field's query parameters and the PATCH, POST, or PUT form data.
 	// This field is only available after ParseForm is called.
 	// The HTTP client ignores Form and uses Body instead.
+	// 既包含来自 HTTP body 的，也包含来自 URL 的
 	Form url.Values
 
 	// PostForm contains the parsed form data from PATCH, POST
@@ -249,6 +250,7 @@ type Request struct {
 	//
 	// This field is only available after ParseForm is called.
 	// The HTTP client ignores PostForm and uses Body instead.
+	// 只包含来自 HTTP body 的
 	PostForm url.Values
 
 	// MultipartForm is the parsed multipart form, including file uploads.

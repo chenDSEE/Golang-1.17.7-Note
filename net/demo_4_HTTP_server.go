@@ -25,7 +25,6 @@ func helperHandler(w http.ResponseWriter, r *http.Request) {
 
 func headerControlHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[%s]==> headerControlHandler visit %s\n", r.RemoteAddr, r.URL.Path)
-
 	
 	/* set HTTP Header */
 	w.Header().Set("Allow", http.MethodPost) // Header.Set() 只会设置一个 Allow Header
@@ -110,6 +109,90 @@ func (obj *chainObj) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, r.URL.Path+" finish object chain call\n")
 }
 
+/* request demo */
+func requestDemoHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> requestDemoHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+	// dump request Header
+	for key, valueSlice := range r.Header {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	// dump request body
+	buf := make([]byte, 50)
+	r.Body.Read(buf)
+	fmt.Printf("body:[%s]\n", string(buf))
+	fmt.Println("====== all done ======")
+}
+
+/* HTTP URL encoded demo */
+//  Issue by: curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
+//
+//	POST /http-web-form?param-1=val-1&param-2=123 HTTP/1.1
+//	Host: localhost:8080
+//	User-Agent: curl/7.83.1
+//	Accept: */*
+//	Content-Length: 27
+//	Content-Type: application/x-www-form-urlencoded
+//	\r\n
+//	param-1=value-2&param-3=456
+//
+func httpUrlEncodedHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpUrlEncodedHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// parse request body data to Form
+	if err := r.ParseForm(); err != nil {
+		fmt.Println("request parse Form error, ", err)
+		return
+	}
+
+	// dump http.Request.Form
+	// 无论你的参数是放在 URL 上，还是 body 里面，都能够被解析进来这里
+	// 在 HTML Form 的 value 总是在 URL 的 value 前面
+	// 即使是 %20 也会帮你变回空格
+	fmt.Println("==== dump r.Form ====")
+	for key, valueSlice := range r.Form {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	// dump http value from request body(HTML form)
+	// 只支持 x-www-form-urlencoded 类型
+	fmt.Println("==== dump r.PostForm ====")
+	for key, valueSlice := range r.PostForm {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	fmt.Println("====== all done ======")
+}
+
+/* HTTP form-data demo */
+//  Issue by: curl 'http://localhost:8080/http-form-data' -F 'Para-1=Value-1' -F 'Para-2=Value-2' -F 'Para-1=Value-3'
+func httpFormDataHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpFormDataHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// parse request body data to Form
+	if err := r.ParseMultipartForm(1024); err != nil {
+		fmt.Println("request parse MultipartForm error, ", err)
+		return
+	}
+
+	// dump http.Request.Form
+	// 只包含在 body 里面的参数
+	fmt.Println("==== dump r.Form ====")
+	for key, valueSlice := range r.MultipartForm.Value {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	fmt.Println("====== all done ======")
+}
+
 /* route version */
 // test case:
 //   curl -i http://localhost:8080/
@@ -120,6 +203,9 @@ func (obj *chainObj) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //   curl -i http://localhost:8080/header-control
 //   curl -i http://localhost:8080/chaining-function
 //   curl -i http://localhost:8080/chaining-object
+//   curl -i -d "Name=name&Age=10" http://localhost:8080/request-demo
+//   curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
+//   curl 'http://localhost:8080/http-form-data' -F 'Para-1=Value-1' -F 'Para-2=Value-2' -F 'Para-1=Value-3'
 func main() {
 	fmt.Println("====== HTTP Server Start ======")
 
@@ -172,6 +258,11 @@ func main() {
 	// chaining-function
 	mux.HandleFunc("/chaining-function", auditLog(authCheck(chainFunctionHandler)))
 	mux.Handle("/chaining-object", objAuditLog(objAuthCheck(&chainObj{"chaining"})))
+
+	// HTTP Form demo
+	mux.HandleFunc("/request-demo", requestDemoHandler)
+	mux.HandleFunc("/http-url-encoded", httpUrlEncodedHandler)
+	mux.HandleFunc("/http-form-data", httpFormDataHandler)
 
 	// step 2: 启动 http 的监听，并且把这个路由表传递给相应的 TCP server
 	server := &http.Server{Addr: "localhost:8080", Handler: mux}
