@@ -1046,6 +1046,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 )
 
@@ -1068,7 +1069,6 @@ func helperHandler(w http.ResponseWriter, r *http.Request) {
 
 func headerControlHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[%s]==> headerControlHandler visit %s\n", r.RemoteAddr, r.URL.Path)
-
 	
 	/* set HTTP Header */
 	w.Header().Set("Allow", http.MethodPost) // Header.Set() 只会设置一个 Allow Header
@@ -1153,7 +1153,175 @@ func (obj *chainObj) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, r.URL.Path+" finish object chain call\n")
 }
 
-/* route version */
+/* request demo */
+func requestDemoHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> requestDemoHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+	// dump request Header
+	for key, valueSlice := range r.Header {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	// dump request body
+	buf := make([]byte, 50)
+	r.Body.Read(buf)
+	fmt.Printf("body:[%s]\n", string(buf))
+	fmt.Println("====== all done ======")
+}
+
+/* HTTP URL encoded demo */
+//  Issue by: curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
+//
+//	POST /http-web-form?param-1=val-1&param-2=123 HTTP/1.1
+//	Host: localhost:8080
+//	User-Agent: curl/7.83.1
+//	Accept: */*
+//	Content-Length: 27
+//	Content-Type: application/x-www-form-urlencoded
+//	\r\n
+//	param-1=value-2&param-3=456
+//
+func httpUrlEncodedHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpUrlEncodedHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// parse request body data to Form
+	if err := r.ParseForm(); err != nil {
+		fmt.Println("request parse Form error, ", err)
+		return
+	}
+
+	// dump http.Request.Form
+	// 无论你的参数是放在 URL 上，还是 body 里面，都能够被解析进来这里
+	// 在 HTML Form 的 value 总是在 URL 的 value 前面
+	// 即使是 %20 也会帮你变回空格
+	fmt.Println("==== dump r.Form ====")
+	for key, valueSlice := range r.Form {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	// dump http value from request body(HTML form)
+	// 只支持 x-www-form-urlencoded 类型
+	fmt.Println("==== dump r.PostForm ====")
+	for key, valueSlice := range r.PostForm {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	fmt.Println("====== all done ======")
+}
+
+/* HTTP form-data demo */
+//  Issue by: curl 'http://localhost:8080/http-form-data' -F 'Para-1=Value-1' -F 'Para-2=Value-2' -F 'Para-1=Value-3'
+func httpFormDataHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpFormDataHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// parse request body data to Form
+	if err := r.ParseMultipartForm(1024); err != nil {
+		fmt.Println("request parse MultipartForm error, ", err)
+		return
+	}
+
+	// dump http.Request.Form
+	// 只包含在 body 里面的参数
+	fmt.Println("==== dump r.Form ====")
+	for key, valueSlice := range r.MultipartForm.Value {
+		for _, value := range valueSlice {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	fmt.Println("====== all done ======")
+}
+
+/* HTTP upload file demo */
+// Issue by: curl http://localhost:8080/http-file-upload -X POST -F 'fileName=@/PATH/TO/file.txt'
+func httpFileUpoladHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpFileUpoladHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	var data []byte
+	if false {
+		// 解析方式 1: 手动解析
+		r.ParseMultipartForm(1024)
+		fileHeader := r.MultipartForm.File["fileName"][0]
+		file, err := fileHeader.Open()
+		if err != nil {
+			fmt.Println("request parse fileHeader.Open() error, ", err)
+			return
+		}
+		data, err = ioutil.ReadAll(file)
+		if err != nil {
+			fmt.Println("request read file error, ", err)
+			return
+		}
+
+	} else {
+		// 解析方式 2: 直接调用
+		file, _, err := r.FormFile("fileName")
+		if err != nil {
+			fmt.Println("request parse FormFile() error, ", err)
+			return
+		}
+		data, err = ioutil.ReadAll(file)
+		if err != nil {
+			fmt.Println("request read file error, ", err)
+			return
+		}
+	}
+	fmt.Printf("data:[%s]\n", string(data))
+
+	fmt.Println("====== all done ======")
+}
+
+/* server dispatch cookie */
+func dispatchCookieHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> dispatchCookieHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	cookie1 := http.Cookie{
+		Name: "cookie_one",
+		Value: "cookie-value-one",
+		HttpOnly: true,
+	}
+	cookie2 := http.Cookie{
+		Name: "cookie_two",
+		Value: "cookie-value-two",
+		HttpOnly: true,
+	}
+
+	w.Header().Set("Set-Cookie", cookie1.String())
+	http.SetCookie(w, &cookie2)
+}
+
+/* client upload cookie */
+func uploadCookieHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> uploadCookieHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// cookie 本质上就是一个 HTTP Header，所以直接通过 r.Header 也获取也没毛病
+	{
+		cookies := r.Header["Cookie"]
+		fmt.Println("via r.Header map:", cookies)
+	}
+
+	// 获得指定 cookie
+	{
+		cookie, err := r.Cookie("key-1")
+		if err != nil {
+			fmt.Println("can not find cookie with key-1", err)
+			return
+		}
+		fmt.Println("via r.Cookie(), key-1 =", cookie)
+	}
+
+	// 直接拿全部 cookie
+	{
+		cookies := r.Cookies()
+		fmt.Println("via r.Cookies()", cookies)
+	}
+}
+
 // test case:
 //   curl -i http://localhost:8080/
 //   curl -i http://localhost:8080/hello
@@ -1163,6 +1331,12 @@ func (obj *chainObj) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //   curl -i http://localhost:8080/header-control
 //   curl -i http://localhost:8080/chaining-function
 //   curl -i http://localhost:8080/chaining-object
+//   curl -i -d "Name=name&Age=10" http://localhost:8080/request-demo
+//   curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
+//   curl 'http://localhost:8080/http-form-data' -F 'Para-1=Value-1' -F 'Para-2=Value-2' -F 'Para-1=Value-3'
+//   curl http://localhost:8080/http-file-upload -X POST -F 'fileName=@/PATH/TO/file.txt'
+//   curl -i http://localhost:8080/dispatch-cookie
+//   curl -v http://localhost:8080/upload-cookie --cookie 'key-1=value-1' --cookie 'key-2=value-2' --cookie 'key-1=value-3'
 func main() {
 	fmt.Println("====== HTTP Server Start ======")
 
@@ -1215,6 +1389,16 @@ func main() {
 	// chaining-function
 	mux.HandleFunc("/chaining-function", auditLog(authCheck(chainFunctionHandler)))
 	mux.Handle("/chaining-object", objAuditLog(objAuthCheck(&chainObj{"chaining"})))
+
+	// HTTP Form demo
+	mux.HandleFunc("/request-demo", requestDemoHandler)
+	mux.HandleFunc("/http-url-encoded", httpUrlEncodedHandler)
+	mux.HandleFunc("/http-form-data", httpFormDataHandler)
+	mux.HandleFunc("/http-file-upload", httpFileUpoladHandler)
+
+	// cookie demo
+	mux.HandleFunc("/dispatch-cookie", dispatchCookieHandler)
+	mux.HandleFunc("/upload-cookie", uploadCookieHandler)
 
 	// step 2: 启动 http 的监听，并且把这个路由表传递给相应的 TCP server
 	server := &http.Server{Addr: "localhost:8080", Handler: mux}
@@ -1348,6 +1532,8 @@ func main() {
 ## struct
 
 ### http.ServeMux
+
+- `ServeMux` struct 也实现了 `ServeHTTP()` method，是一个 `http.Handler` interface，所以对于 `http.Server` 与 `http.ServeMux` 来说，实际上是将不具有路由能能力的一个个 callback function，统统放到 `http.ServeMux`，由 `http.ServeMux` 做一个横切面的转发（这也是一种==串联包裹==，路由转发的逻辑，与框架解耦，同时也跟业务代码解耦）
 
 ```go
 // ServeMux is an HTTP request multiplexer.
@@ -1639,6 +1825,10 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 
 
 #### http.ServeMux 是怎么 match 路由的？
+
+- 注册 URL `/top/url` 与 `/top/url/` 的区别在于：访问 `/top/url/no`
+  - `/top/url`：找不到 `no` 的话，交由 `/top` 处理。（要求完全匹配）
+  - `/top/url/`：找不到 `no` 的话，交由 `/top/url` 处理
 
 - 实际上就是：URL 处理 + hash-map 查找
 
@@ -2195,6 +2385,8 @@ func (c *conn) serve(ctx context.Context) {
 
 ### http.Request
 
+- 根据 RFC 的规定，HTTP Requset 的 GET Method 是不会有 body 的。当 GET request 需要带上参数的话，只能把参数放到 URL 里面，才能给 server 带上去
+
 ```go
 // A Request represents an HTTP request received by a server
 // or to be sent by a client.
@@ -2212,152 +2404,32 @@ type Request struct {
 	ProtoMinor int    // 0
 
 	/* HTTP Header, 采用 hash-map 的方式保存 */
-	// Header contains the request header fields either received
-	// by the server or to be sent by the client.
-	//	Header = map[string][]string{
-	//		"Accept-Encoding": {"gzip, deflate"},
-	//		"Accept-Language": {"en-us"},
-	//		"Foo": {"Bar", "two"},
-	//	}
-	Header Header
+	Header Header       // HTTP Header
+	Body io.ReadCloser  // HTTP Body
 
-	// Body is the request's body.
-	//
-	// For client requests, a nil body means the request has no
-	// body, such as a GET request. The HTTP Client's Transport
-	// is responsible for calling the Close method.
-	//
-	// For server requests, the Request Body is always non-nil
-	// but will return EOF immediately when no body is present.
-	// The Server will close the request body. The ServeHTTP
-	// Handler does not need to.
-	//
-	// Body must allow Read to be called concurrently with Close.
-	// In particular, calling Close should unblock a Read waiting
-	// for input.
-	Body io.ReadCloser
-
-	// GetBody defines an optional func to return a new copy of
-	// Body. It is used for client requests when a redirect requires
-	// reading the body more than once. Use of GetBody still
-	// requires setting Body.
-	//
-	// For server requests, it is unused.
+	// 定制 Body 的解析与获取
 	GetBody func() (io.ReadCloser, error)
-
-	// ContentLength records the length of the associated content.
-	// The value -1 indicates that the length is unknown.
-	// Values >= 0 indicate that the given number of bytes may
-	// be read from Body.
-	//
-	// For client requests, a value of 0 with a non-nil Body is
-	// also treated as unknown.
 	ContentLength int64
-
-	// TransferEncoding lists the transfer encodings from outermost to
-	// innermost. An empty list denotes the "identity" encoding.
-	// TransferEncoding can usually be ignored; chunked encoding is
-	// automatically added and removed as necessary when sending and
-	// receiving requests.
 	TransferEncoding []string
-
-	// Close indicates whether to close the connection after
-	// replying to this request (for servers) or after sending this
-	// request and reading its response (for clients).
-	//
-	// For server requests, the HTTP server handles this automatically
-	// and this field is not needed by Handlers.
-	//
-	// For client requests, setting this field prevents re-use of
-	// TCP connections between requests to the same hosts, as if
-	// Transport.DisableKeepAlives were set.
 	Close bool
 
 	/* 基本是必须有的 header，所以特别提取出来 */
 	Host string
 
-	// Form contains the parsed form data, including both the URL
-	// field's query parameters and the PATCH, POST, or PUT form data.
-	// This field is only available after ParseForm is called.
-	// The HTTP client ignores Form and uses Body instead.
+	/* HTML Form */
 	Form url.Values
-
-	// PostForm contains the parsed form data from PATCH, POST
-	// or PUT body parameters.
-	//
-	// This field is only available after ParseForm is called.
-	// The HTTP client ignores PostForm and uses Body instead.
 	PostForm url.Values
-
-	// MultipartForm is the parsed multipart form, including file uploads.
-	// This field is only available after ParseMultipartForm is called.
-	// The HTTP client ignores MultipartForm and uses Body instead.
 	MultipartForm *multipart.Form
 
-	// Trailer specifies additional headers that are sent after the request
-	// body.
-	//
-	// For server requests, the Trailer map initially contains only the
-	// trailer keys, with nil values. (The client declares which trailers it
-	// will later send.)  While the handler is reading from Body, it must
-	// not reference Trailer. After reading from Body returns EOF, Trailer
-	// can be read again and will contain non-nil values, if they were sent
-	// by the client.
-	//
-	// For client requests, Trailer must be initialized to a map containing
-	// the trailer keys to later send. The values may be nil or their final
-	// values. The ContentLength must be 0 or -1, to send a chunked request.
-	// After the HTTP request is sent the map values can be updated while
-	// the request body is read. Once the body returns EOF, the caller must
-	// not mutate Trailer.
-	//
-	// Few HTTP clients, servers, or proxies support HTTP trailers.
 	Trailer Header
 
-	// RemoteAddr allows HTTP servers and other software to record
-	// the network address that sent the request, usually for
-	// logging. This field is not filled in by ReadRequest and
-	// has no defined format. The HTTP server in this package
-	// sets RemoteAddr to an "IP:port" address before invoking a
-	// handler.
-	// This field is ignored by the HTTP client.
 	RemoteAddr string
-
-	// RequestURI is the unmodified request-target of the
-	// Request-Line (RFC 7230, Section 3.1.1) as sent by the client
-	// to a server. Usually the URL field should be used instead.
-	// It is an error to set this field in an HTTP client request.
 	RequestURI string
 
-	// TLS allows HTTP servers and other software to record
-	// information about the TLS connection on which the request
-	// was received. This field is not filled in by ReadRequest.
-	// The HTTP server in this package sets the field for
-	// TLS-enabled connections before invoking a handler;
-	// otherwise it leaves the field nil.
-	// This field is ignored by the HTTP client.
 	TLS *tls.ConnectionState
 
-	// Cancel is an optional channel whose closure indicates that the client
-	// request should be regarded as canceled. Not all implementations of
-	// RoundTripper may support Cancel.
-	//
-	// For server requests, this field is not applicable.
-	//
-	// Deprecated: Set the Request's context with NewRequestWithContext
-	// instead. If a Request's Cancel field and context are both
-	// set, it is undefined whether Cancel is respected.
 	Cancel <-chan struct{}
-
-	// Response is the redirect response which caused this request
-	// to be created. This field is only populated during client
-	// redirects.
 	Response *Response
-
-	// ctx is either the client or server context. It should only
-	// be modified via copying the whole Request using WithContext.
-	// It is unexported to prevent people from using Context wrong
-	// and mutating the contexts held by callers of the same request.
 	ctx context.Context
 }
 ```
@@ -2539,6 +2611,53 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	return req, nil
 }
 
+// 再往下的话，其实就没什么意思了，
+// 都是根据 ':', '\r\n' 这些特殊字符进行字符串的拼接、裁剪
+net/textproto/reader.go:
+func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
+    ......
+	m := make(MIMEHeader, hint)
+	.....
+    
+	for {
+		/* 读一行出来 */
+		kv, err := r.readContinuedLineSlice(mustHaveFieldNameColon)
+		if len(kv) == 0 {
+			return m, err
+		}
+
+		// Key ends at first colon.
+		/* 根据 ':' 进行 key， value 之间的划分 */
+		i := bytes.IndexByte(kv, ':')
+		if i < 0 {
+			return m, ProtocolError("malformed MIME header line: " + string(kv))
+		}
+		// 将 key 从 bufio 里面拷贝了出来，一次深拷贝
+		key := canonicalMIMEHeaderKey(kv[:i])
+		......
+		/* 取出 value */
+		// 将 value 从 bufio 里面拷贝了出来，一次深拷贝
+		value := string(kv[i:])
+
+		/* 更新 Header map */
+		vv := m[key]
+		if vv == nil && len(strs) > 0 {
+			// More than likely this will be a single-element key.
+			// Most headers aren't multi-valued.
+			// Set the capacity on strs[0] to 1, so any future append
+			// won't extend the slice into the other strings.
+			vv, strs = strs[:1:1], strs[1:]
+			vv[0] = value
+			m[key] = vv
+		} else {
+			m[key] = append(vv, value)
+		}
+
+		if err != nil {
+			return m, err
+		}
+	}
+}
 ```
 
 
@@ -2682,6 +2801,17 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 }
 
 ```
+
+
+
+
+
+#### request Form 解析
+
+```go
+```
+
+
 
 
 

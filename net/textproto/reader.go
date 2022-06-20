@@ -502,17 +502,19 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 	}
 
 	for {
+		/* 读一行出来 */
 		kv, err := r.readContinuedLineSlice(mustHaveFieldNameColon)
 		if len(kv) == 0 {
 			return m, err
 		}
 
 		// Key ends at first colon.
+		/* 根据 ':' 进行 key， value 之间的划分 */
 		i := bytes.IndexByte(kv, ':')
 		if i < 0 {
 			return m, ProtocolError("malformed MIME header line: " + string(kv))
 		}
-		key := canonicalMIMEHeaderKey(kv[:i]) // 将 key 从 bufio 里面拷贝了出来
+		key := canonicalMIMEHeaderKey(kv[:i]) // 将 key 从 bufio 里面拷贝了出来，一次深拷贝
 
 		// As per RFC 7230 field-name is a token, tokens consist of one or more chars.
 		// We could return a ProtocolError here, but better to be liberal in what we
@@ -526,8 +528,10 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 		for i < len(kv) && (kv[i] == ' ' || kv[i] == '\t') {
 			i++
 		}
-		value := string(kv[i:]) // 将 value 从 bufio 里面拷贝了出来
+		/* 取出 value */
+		value := string(kv[i:]) // 将 value 从 bufio 里面拷贝了出来，一次深拷贝
 
+		/* 更新 Header map */
 		vv := m[key]
 		if vv == nil && len(strs) > 0 {
 			// More than likely this will be a single-element key.

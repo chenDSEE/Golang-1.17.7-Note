@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 )
 
@@ -193,7 +194,91 @@ func httpFormDataHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("====== all done ======")
 }
 
-/* route version */
+/* HTTP upload file demo */
+// Issue by: curl http://localhost:8080/http-file-upload -X POST -F 'fileName=@/PATH/TO/file.txt'
+func httpFileUpoladHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> httpFileUpoladHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	var data []byte
+	if false {
+		// 解析方式 1: 手动解析
+		r.ParseMultipartForm(1024)
+		fileHeader := r.MultipartForm.File["fileName"][0]
+		file, err := fileHeader.Open()
+		if err != nil {
+			fmt.Println("request parse fileHeader.Open() error, ", err)
+			return
+		}
+		data, err = ioutil.ReadAll(file)
+		if err != nil {
+			fmt.Println("request read file error, ", err)
+			return
+		}
+
+	} else {
+		// 解析方式 2: 直接调用
+		file, _, err := r.FormFile("fileName")
+		if err != nil {
+			fmt.Println("request parse FormFile() error, ", err)
+			return
+		}
+		data, err = ioutil.ReadAll(file)
+		if err != nil {
+			fmt.Println("request read file error, ", err)
+			return
+		}
+	}
+	fmt.Printf("data:[%s]\n", string(data))
+
+	fmt.Println("====== all done ======")
+}
+
+/* server dispatch cookie */
+func dispatchCookieHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> dispatchCookieHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	cookie1 := http.Cookie{
+		Name: "cookie_one",
+		Value: "cookie-value-one",
+		HttpOnly: true,
+	}
+	cookie2 := http.Cookie{
+		Name: "cookie_two",
+		Value: "cookie-value-two",
+		HttpOnly: true,
+	}
+
+	w.Header().Set("Set-Cookie", cookie1.String())
+	http.SetCookie(w, &cookie2)
+}
+
+/* client upload cookie */
+func uploadCookieHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("[%s]==> uploadCookieHandler visit %s\n", r.RemoteAddr, r.URL.Path)
+
+	// cookie 本质上就是一个 HTTP Header，所以直接通过 r.Header 也获取也没毛病
+	{
+		cookies := r.Header["Cookie"]
+		fmt.Println("via r.Header map:", cookies)
+	}
+
+	// 获得指定 cookie
+	{
+		cookie, err := r.Cookie("key-1")
+		if err != nil {
+			fmt.Println("can not find cookie with key-1", err)
+			return
+		}
+		fmt.Println("via r.Cookie(), key-1 =", cookie)
+	}
+
+	// 直接拿全部 cookie
+	{
+		cookies := r.Cookies()
+		fmt.Println("via r.Cookies()", cookies)
+	}
+}
+
 // test case:
 //   curl -i http://localhost:8080/
 //   curl -i http://localhost:8080/hello
@@ -206,6 +291,9 @@ func httpFormDataHandler(w http.ResponseWriter, r *http.Request) {
 //   curl -i -d "Name=name&Age=10" http://localhost:8080/request-demo
 //   curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
 //   curl 'http://localhost:8080/http-form-data' -F 'Para-1=Value-1' -F 'Para-2=Value-2' -F 'Para-1=Value-3'
+//   curl http://localhost:8080/http-file-upload -X POST -F 'fileName=@/PATH/TO/file.txt'
+//   curl -i http://localhost:8080/dispatch-cookie
+//   curl -v http://localhost:8080/upload-cookie --cookie 'key-1=value-1' --cookie 'key-2=value-2' --cookie 'key-1=value-3'
 func main() {
 	fmt.Println("====== HTTP Server Start ======")
 
@@ -263,6 +351,11 @@ func main() {
 	mux.HandleFunc("/request-demo", requestDemoHandler)
 	mux.HandleFunc("/http-url-encoded", httpUrlEncodedHandler)
 	mux.HandleFunc("/http-form-data", httpFormDataHandler)
+	mux.HandleFunc("/http-file-upload", httpFileUpoladHandler)
+
+	// cookie demo
+	mux.HandleFunc("/dispatch-cookie", dispatchCookieHandler)
+	mux.HandleFunc("/upload-cookie", uploadCookieHandler)
 
 	// step 2: 启动 http 的监听，并且把这个路由表传递给相应的 TCP server
 	server := &http.Server{Addr: "localhost:8080", Handler: mux}
