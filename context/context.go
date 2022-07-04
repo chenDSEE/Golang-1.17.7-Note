@@ -292,6 +292,8 @@ func propagateCancel(parent Context, child canceler) {
 	if p, ok := parentCancelCtx(parent); ok {
 		p.mu.Lock()
 		if p.err != nil {
+			// 因为 p.err 在 cancel 的时候，一定会设置 err 这个字段的
+			// 所以当 p.err != nil 的时候，就意味着已经被 cancel 过了，不需要再次 cancel
 			// parent has already been canceled
 			child.cancel(false, p.err)
 		} else {
@@ -421,7 +423,7 @@ type cancelCtx struct {
 	 */
 	done     atomic.Value          // of chan struct{}, created lazily, closed by first cancel call
 	children map[canceler]struct{} // set to nil by the first cancel call
-	err      error                 // set to non-nil by the first cancel call
+	err      error                 // set to non-nil by the first cancel call; 总是 non-nil 的，正常 cancel 的话就是填充 Canceled
 }
 
 // cancelCtx 本身并不携带任何的 key-Value, 所以通常情况下
@@ -481,6 +483,7 @@ func (c *cancelCtx) String() string {
 	return contextName(c.Context) + ".WithCancel"
 }
 
+// 这是可重入的，注意 channel 是不能多次 close 的
 // cancel closes c.done, cancels each of c's children, and, if
 // removeFromParent is true, removes c from its parent's children.
 // 先执行自己这一层的 cancel(), 然后执行 cancelCtx.chindren[n].cancel()
@@ -493,9 +496,13 @@ func (c *cancelCtx) cancel(removeFromParent bool, err error) {
 	}
 	c.mu.Lock()
 	if c.err != nil {
+		// 这个 cancelCtx 已经调用过 cancel() 了
+		// done channel 一旦被关闭之后，c.err 一定会被填值
 		c.mu.Unlock()
 		return // already canceled
 	}
+
+	// 下面的操作，只能发生一次
 	c.err = err
 	d, _ := c.done.Load().(chan struct{})
 	if d == nil {
