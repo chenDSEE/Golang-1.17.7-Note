@@ -128,6 +128,7 @@ func requestDemoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 /* HTTP URL encoded demo */
+// case 1:
 //  Issue by: curl 'http://localhost:8080/http-url-encoded?param-1=value-1&param-2=123' -X POST -d 'param-1=value-2&param-3=456'
 //
 //	POST /http-web-form?param-1=val-1&param-2=123 HTTP/1.1
@@ -139,6 +140,16 @@ func requestDemoHandler(w http.ResponseWriter, r *http.Request) {
 //	\r\n
 //	param-1=value-2&param-3=456
 //
+// case 2:
+//  Issue by: curl  'http://localhost:8080/http-url-encoded' --data-urlencode "name=chelly" --data-urlencode "key=value" --data-urlencode "name=aimer"
+//      POST /http-url-encoded HTTP/1.1
+//      Host: localhost:8080
+//      User-Agent: curl/7.83.1
+//      Accept: */*
+//      Content-Length: 33
+//      Content-Type: application/x-www-form-urlencoded
+//	
+//      name=chelly&key=value&name=aimer
 func httpUrlEncodedHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("[%s]==> httpUrlEncodedHandler visit %s\n", r.RemoteAddr, r.URL.Path)
 

@@ -478,7 +478,7 @@ func (r *Request) MultipartReader() (*multipart.Reader, error) {
 }
 
 func (r *Request) multipartReader(allowMixed bool) (*multipart.Reader, error) {
-	v := r.Header.Get("Content-Type")
+	v := r.Header.Get("Content-Type") // Header like: Content-Type=text/html; charset=utf-8
 	if v == "" {
 		return nil, ErrNotMultipart
 	}
@@ -1022,8 +1022,9 @@ func ReadRequest(b *bufio.Reader) (*Request, error) {
 	return req, err
 }
 
+// 根据 HTTP 协议的格式，读取 TCP 数据，并格式化为 http.Request
 // http request = 1 * request line + n * header + '\r\n' + [body]
-// 仅仅处理一个 http reqyest
+// 仅仅处理一个 http request，并且完成了 request-line + Header 的全部数据接收。但是 body 是没有进行解析或者是主动读取的
 // 通过使用 *bufio.Reader 相当于限制了 readRequest 仅仅具有 read 的能力，并不具备改写数据的能力
 // 输入：原始的 TCP 数据，没有任何处理。b 就是 net.http.conn.bufr = newBufioReader(&connReader{conn: net.http.conn})
 // 输出：根据 HTTP 协议解析后的 net.http.Request, 而且大部分数据是从 *bufio.Reader 里面拷贝出来的
@@ -1033,8 +1034,10 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 
 	// First line: GET /index.html HTTP/1.0
 	/* part 1: request line 解析 */
+	// 尝试读出 one line，作为 HTTP 的 request line 进行解析
+	// 整个 request-line 解析完，才会从 `tp.ReadLine()` 返回。
 	var s string
-	if s, err = tp.ReadLine(); err != nil {
+	if s, err = tp.ReadLine(); err != nil { // 可能发生 block，等待新的 HTTP 请求
 		return nil, err
 	}
 	defer func() {
@@ -1094,7 +1097,8 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 	 * 再者，进行拷贝会让单个请求的完成速度变慢。但是拷贝完之后，就可以将后续的事情交由其他 CPU 完成
 	 * 降低了单个请求的处理速度，但是提高了并发度。
 	 */
-	mimeHeader, err := tp.ReadMIMEHeader()
+	// 全部 Header 解析完才会从 tp.ReadMIMEHeader() 返回
+	mimeHeader, err := tp.ReadMIMEHeader() // 可能会发生 block，因为 Header 可能在多个 TCP packet 里面
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1126,18 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 
 	req.Close = shouldClose(req.ProtoMajor, req.ProtoMinor, req.Header, false)
 
+	// ====> 到这里为止，request-line、Header 已经全部接收，并且完成了相应的解析工作
+
 	/* part 3: body */
+	/* 为 body 部分构建 Reader，并且放到 request.body 里面
+	 * 1. chunked body 使用 net/http.internal.chunkedReader
+	 * 2. 定长 body 使用 io.LimitReader
+	 * 3. 没有 body 则使用 net/http.noBody
+	 *
+	 * 注意，这个时候，其实 bufio 里面已经没有 request-line、Header 的数据了
+	 * 所以可以让 body 再次使用 b 这个 bufio 来缓冲 body 数据
+	 * 所以上面三种 Reader 都是基于 b 这个 bufio 来做的
+	 */
 	err = readTransfer(req, b)
 	if err != nil {
 		return nil, err
@@ -1245,6 +1260,7 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
 			err = errors.New("http: POST too large")
 			return
 		}
+		// 因为 urlencoded 在 http 里面，也是 path?aaa=bbb&ccc=ddd
 		vs, e = url.ParseQuery(string(b))
 		if err == nil {
 			err = e
@@ -1265,6 +1281,7 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
 // For all requests, ParseForm parses the raw query from the URL and updates
 // r.Form.
 //
+// POST, PUT, and PATCH 的方式将会把数据格式化进 http 的 body 里面
 // For POST, PUT, and PATCH requests, it also reads the request body, parses it
 // as a form and puts the results into both r.PostForm and r.Form. Request body
 // parameters take precedence over URL query string values in r.Form.
@@ -1282,6 +1299,8 @@ func (r *Request) ParseForm() error {
 	var err error
 	if r.PostForm == nil {
 		if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" {
+			// 只有这三种 method 的时候。需要从 http body 中将数据提取出来
+			// 其他情况提交的 form，浏览器会将数据格式化到 URL 里面
 			r.PostForm, err = parsePostForm(r)
 		}
 		if r.PostForm == nil {

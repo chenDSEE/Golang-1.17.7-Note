@@ -393,6 +393,19 @@ func (b *Buffer) WriteTo(w io.Writer) (n int64, err error) {
 > 看起来更适合 I/O，采用的是类似于环形 buffer 的思路，核心目的是尽可能减少 IO 的次数，每次 IO 尽可能从内核态多拿一些数据出来
 
 - 值得注意的是，bufio package 是应用层的 buf，是在操作系统层之上的！不能把 bufio 直接当成操作系统的 page cache、buffer
+- 无论是 `bufio.Reader` 还是 `bufio.Writer` 都是尽可能不改变原有 `Reader`, `Writer` 的 IO 行为的（block、non-block）
+  - `bufio.Writer` 通常是通过 `Flush()` 调用底层 `bufio.Writer.wr.Write()` 来完成刷写的。当 buf 装不下这么多数据的时候，而且 `wr` 也没有空间写的话，很可能是发生 block。因为 bufio 不改变底层 IO 的行为，仅仅是作为一层 buffer 减少 IO 的次数。（如果底层 IO 是非阻塞的话，那就不会 block 这个 goroutine，直接返回错误 again）
+  - `bufio.Reader` 通常是通过 `fill()` 调用底层 `bufio.Reader.rd.Read()` 来完成读取的。当 buf 里面没有数据，而且 `rd` 也没有数据的话，很可能是 block 的。因为  bufio 不改变底层 IO 的行为，仅仅是作为一个 buffer，尽可能减少 IO 的次数。（如果底层 IO 是非阻塞的话，那就不会 block 这个 goroutine，直接返回错误 again）
+  - 至于通常就是在上面的两个地方发生 block，至于究竟会不会发生 block IO，这是取决于 `bufio.Reader.rd.Read()` 跟 `bufio.Writer.wr.Write()` 的。
+  - 不会说你 buffer 还有空位，我就一直读，直到 buffer 装满了才返回
+
+
+
+- 注意，有了 bufio 之后，并不是说全部 read, write 数据都要先到 buf，才能到底层 IO 的。
+  - read：要是 buf 没有数据了，而且 `outBuf` 要一次性拿的数据量，比 `bufio.buf` 还多的时候，那就直接从底层 IO 拿数据，直接放到 `bufio.Read(outBuf)` 的 `outBuf` 里面，不经过 `bufio.buf`，减少 IO 次数。当 Read 出来的数据 `outBuf` 装不下的时候，才暂时缓冲到 `bufio.buf` 里面。
+    - 只有当 `outBuf` 比 `bufio.buf` 小的话，那还不如先用 `bufio.buf` 去内核捞数据，这样可以一次性捞更多的数据，减少 IO 次数。
+  - write：也是类似的道理。`bufio.buf` 能装下，那就暂时装到 `bufio.buf` 里面，以减少 IO 次数。转不下了，那就直接往内核灌。
+
 
 
 
@@ -478,7 +491,7 @@ func (b *Reader) fill() {
 	// Read new data: try a limited number of times.
 	for i := maxConsecutiveEmptyReads; i > 0; i-- {
 		// 使用底层 Reader 进行 Read，并且暂存在 bufio.buf 里面
-		n, err := b.rd.Read(b.buf[b.w:])
+		n, err := b.rd.Read(b.buf[b.w:]) // 可能发生 block
 		if n < 0 {
 			panic(errNegativeRead)
 		}
@@ -553,7 +566,7 @@ func (b *Reader) Read(p []byte) (n int, err error) {
 		if len(p) >= len(b.buf) {
 			// Large read, empty buffer.
 			// Read directly into p to avoid copy. 而且还剩去了 buf grow 的开销
-			n, b.err = b.rd.Read(p)
+			n, b.err = b.rd.Read(p) // 可能发生 block
 			if n < 0 {
 				panic(errNegativeRead)
 			}
@@ -570,7 +583,7 @@ func (b *Reader) Read(p []byte) (n int, err error) {
 		// 而不是像 bytes.Buffer 那样让 GC 去回收内存
 		b.r = 0
 		b.w = 0
-		n, b.err = b.rd.Read(b.buf)
+		n, b.err = b.rd.Read(b.buf) // 可能发生 block
 		if n < 0 {
 			panic(errNegativeRead)
 		}
@@ -758,7 +771,7 @@ func (b *Writer) Write(p []byte) (nn int, err error) {
 		if b.Buffered() == 0 {
 			// Large write, empty buffer.
 			// Write directly from p to avoid copy.
-			n, b.err = b.wr.Write(p)
+			n, b.err = b.wr.Write(p) // 可能发生 block
 		} else {
 			// 可能是 case-2: bufio.Writer.buf 已经没有多少 buffer 空间
 			n = copy(b.buf[b.n:], p)
@@ -797,7 +810,7 @@ func (b *Writer) Flush() error {
 	if b.n == 0 {
 		return nil
 	}
-	n, err := b.wr.Write(b.buf[0:b.n])
+	n, err := b.wr.Write(b.buf[0:b.n]) // 可能发生 block
 	if n < b.n && err == nil {
 		err = io.ErrShortWrite
 	}

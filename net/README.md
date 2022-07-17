@@ -1820,7 +1820,7 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
 
 ```
 
-
+> `http.HandlerFunc` type 的方式，利用了显示转换的方式，让一个普通的函数类型，也能够拥有其 method
 
 
 
@@ -3466,6 +3466,94 @@ type Response struct {
 
 
 
+> ==下面的分析不一定对==，interface 的嵌套，跨层调用太多了，理得不是很清晰。到时候要看看 github 上的 issue 确认一下。
+
+- background goroutine 是预先开始接收下一个 request 的数据。启动一个 background goroutine 的前提是：当前的 request 的 body 部分已经读取完毕了
+- 因为每一个 request 的循环开头，都会有 read，所以在完成了一个 request-response 的时候，或者是即将开始下一个 request 之前，需要把这个 background goroutine 给停掉。避免影响下一轮的 request-response
+- 同时 `finishRequest()` 还会把当前 request 的 body 给全部扔掉，避免影响下一个 request 的 http 分包
+
+## 当 HTTP 被分割为多个 TCP 怎么办？
+
+**阻塞等待后续的 TCP 报文**。因为 Linux、Golang 官方 SDK 的 net/http packet 是基于 `tcpConn` 来构建的，而再底层一些，则是 `pollFD`, 这时候，在一个 goroutine 的视角看来，这个 IO 是一个阻塞 IO。实际上这时候，整个 goroutine 被挂起了。
+
+最终无论是通过 `bufio` 还是什么 `textproto.Reader.Read()` 都好，这些横向拓展都不会影响 IO 的 block 与否（因为这个拓展层的实际实现并没有改变底层 IO 的 block 或者是 non-blcok 的行为）
+
+当然，通过 goroutine block 的方式进行 IO 及相关代码的编写，其实更符合 Golang 的风格。
+
+
+
+### Request line 被分割
+
+无所谓，block 等待就好。下一个 TCP 没有过来之前，`tp.ReadLine()` 这里是不会返回的，因为 `textproto.Reader` 还没有找到分隔符。（最终 block 在 `bufio.Reader.fill()` 里面的 `bufio.Reader.rd.Read()`）
+
+- 整个 request-line 解析完，才会从 `tp.ReadLine()` 返回。
+
+
+
+### Header 被分割
+
+无所谓，block 等待就好。在全部 Header 没有到齐之前，`tp.ReadMIMEHeader()` 这里是不会返回的。而且后面很多地方都有可能遇到 `readLineSlice()`, 这里都有可能发生 block。
+
+- 全部 Header 解析完才会从 `tp.ReadMIMEHeader()` 返回。
+
+
+
+### Body 被分割
+
+没什么关系，body read 的时候可能会发生 block 而已。给到用户自定义 handler 之前，request-line + header 其实是已经完成了的，剩下的只有 body 没有完成。通过 `LimitReader` 就可以截断定长 body。不定长 body 则是通过 chunkedReader 来完成一个 body 的截断。
+
+每次针对 `net/http.Request.Body.Read()` 的时候，都有可能发生 block。
+
+
+
+
+
+## server 端是怎么应对并发问题的？
+
+
+
+
+
+#### 不同 goroutine 之间
+
+这个问题压根不存在，因为 Golang 官方的 http packet 采用了 one connection one goroutine 的思路，而且只有一个 goroutine 进行 accept，所以这个问题从来就不存在。
+
+
+
+#### 同一个 goroutine 的 Read 并发
+
+> 需要注意的是，net/http package 中，只有 body 才可能在 read 的过程发生并发问题。在把执行流交给用户自定义的 Handler 之前，框架就已经在内部单 goroutine 完成了 request-line 跟 Header 的读取、解析工作。所以只有 http 的 body 可能存在 read 并发问题
+
+- 在 http packet 里面，通过 `net/http.conn.r` 这个 `net/http.connReader` 进行数据 access，是能够在并发情况下安全操作的。`net/http.connReader` 这一层 struct 封装就是用来处理 conn 层面上的并发 Read 的问题（当前 request 与下一个 request 的并发问题）
+- 而实际上，我们是通过 `net/http.Request.Body.Read()` 来读取当前 request 的 body 的。这时候，则是同一个 request 层面上的并发问题，是通过 `net/http.body.mu.Lock()` 来解决的。
+- 确实，`net/http.conn.r` 是并发安全的，但是 `net/http.conn.bufr` 这一层 bufio 却没有在并发情况下，安全操作 buffer 的能力。而这一点则是通过 `net/http.body` 来提供并发保护
+- 对 request 的 body 进行 read，实际上就是调用 `net/http.body.Read()` 也就是  `net/http.body.readLocked()`, 这时候就能够保证，同一时刻，只会有一个 goroutine 操作通过 `net/http.body.src` 来操作 `net/http.conn.bufr` 这个 bufio
+- 只要你觉得 body 没有读完，你都可以通过 `http.Request.Body.Read()` 不停的从底层 socket IO 拿数据。
+  - 当然咯，协议解析发现实际上这个 request 的 body 已经停了，就会返回 EOF 了（定长 body Read 完之后会检查是不是已经把 Content-Length 的内容都读完了，是的话，直接设置 EOF，`sawEOF`）
+  - 后续就不在需要 Read 了
+
+
+
+
+
+#### 同一个 goroutine 的 Write 并发
+
+==TODO==
+
+
+
+
+
+
+
+## 提前 cancel 的话，request 中没用完的数据怎么办？
+
+drop 掉，不然会影响下一次使用整个 `http.conn` 的，因为底层 TCP 的关系。`net/http.response.finishRequest()` 中，`w.conn.r.abortPendingRead()` 负责终止后台的 goroutine，然后 `w.reqBody.Close()` 也就是 `net/http.body.Close()` 把 body 后续的数据读出来，并且 drop 掉。
+
+而 background 的 goroutine 则会通过 `connReader.abortPendingRead()` 触发 background goroutine 的终止，并让 conn 的 main goroutine 同步等待 background 的终止。
+
+- background goroutine 是预先开始接收下一个 request 的数据。启动一个 background goroutine 的前提是：当前的 request 的 body 部分已经读取完毕了
+- 因为每一个 request 的循环开头，都会有 read，所以在完成了一个 request-response 的时候，或者是即将开始下一个 request 之前，需要把这个 background goroutine 给停掉。避免影响下一轮的 request-response
 
 
 
@@ -3475,8 +3563,7 @@ type Response struct {
 
 
 
-
-
+### 提前 cancel 的话，cancel 后往 conn 写入的数据怎么办？
 
 
 

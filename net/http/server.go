@@ -249,6 +249,7 @@ var (
 )
 
 // A conn represents the server side of an HTTP connection.
+// http 层面的 conn
 type conn struct {
 	// server is the server on which the connection arrived.
 	// Immutable; never nil.
@@ -257,11 +258,12 @@ type conn struct {
 	// cancelCtx cancels the connection-level context.
 	cancelCtx context.CancelFunc
 
+	// rwc 里面有原始的 socket，是 *net.TCPConn（net.Conn）
 	// rwc is the underlying network connection.
 	// This is never wrapped by other types and is the value given out
 	// to CloseNotifier callers. It is usually of type *net.TCPConn or
 	// *tls.Conn.
-	rwc net.Conn
+	rwc net.Conn // tcp 层面的 conn
 
 	// remoteAddr is rwc.RemoteAddr().String(). It is not populated synchronously
 	// inside the Listener's Accept goroutine, as some implementations block.
@@ -277,6 +279,10 @@ type conn struct {
 	// It is set via checkConnErrorWriter{w}, where bufw writes.
 	werr error
 
+	// 针对 http.conn 进行 read 方向的并发安全控制，封装为一个 *connReader。
+	// 可以通过 http.conn.r 来进行并发安全的 read data。r 里面的 conn 依然是指向自己
+	// 只不过这个 r 就代表了 read 并发安全的接口
+	// 然后基于并发安全的 connReader 基础之上，再裹上一层 bufio，形成带缓冲的 bufr 跟 bufw
 	// r is bufr's read source. It's a wrapper around rwc that provides
 	// io.LimitedReader-style limiting (while reading request headers)
 	// and functionality to support CloseNotifier. See *connReader docs.
@@ -632,6 +638,7 @@ func (w *response) ReadFrom(src io.Reader) (n int64, err error) {
 const debugServerConnections = false
 
 // Create new connection from rwc. 在 TLSConn 或者是 TCPConn 的基础上再裹一层
+// 将 net.Conn 封装进 http.conn 里面
 func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
 		server: srv,
@@ -655,13 +662,14 @@ type readResult struct {
 // read sizes) with support for selectively keeping an io.Reader.Read
 // call blocked in a background goroutine to wait for activity and
 // trigger a CloseNotifier channel.
+// 底层 *conn 的并发保护层
 type connReader struct {
 	conn *conn
 
 	mu      sync.Mutex // guards following
 	hasByte bool
 	byteBuf [1]byte
-	cond    *sync.Cond
+	cond    *sync.Cond // 使用让进行 abort 的 goroutine 感知到 background goroutine 的终止
 	inRead  bool
 	aborted bool  // set true before conn.rwc deadline is set to past
 	remain  int64 // bytes remaining
@@ -676,10 +684,12 @@ func (cr *connReader) lock() {
 
 func (cr *connReader) unlock() { cr.mu.Unlock() }
 
+// 看起来是为了下一个 request 启动的 goroutine
 func (cr *connReader) startBackgroundRead() {
 	cr.lock()
 	defer cr.unlock()
 	if cr.inRead {
+		// 永远只启动一个 background goroutine 来进行 body 数据接收
 		panic("invalid concurrent Body.Read call")
 	}
 	if cr.hasByte {
@@ -691,10 +701,13 @@ func (cr *connReader) startBackgroundRead() {
 }
 
 func (cr *connReader) backgroundRead() {
-	n, err := cr.conn.rwc.Read(cr.byteBuf[:])
+	// 通过调用流程保证了：同一个 conn 只会有一个 goroutine block 在这里 cr.conn.rwc.Read()
+	// 值得注意的是：len(byteBuf) = 1
+	n, err := cr.conn.rwc.Read(cr.byteBuf[:]) // 实际上这里可以在多读一点，省的再次 read syscall
 	cr.lock()
 	if n == 1 {
 		cr.hasByte = true
+		// 这个 background goroutine 跟 context 其实搭配是会有一些问题的
 		// We were past the end of the previous request's body already
 		// (since we wouldn't be in a background read otherwise), so
 		// this is a pipelined HTTP request. Prior to Go 1.11 we used to
@@ -727,6 +740,7 @@ func (cr *connReader) backgroundRead() {
 	cr.aborted = false
 	cr.inRead = false
 	cr.unlock()
+
 	cr.cond.Broadcast()
 }
 
@@ -799,7 +813,7 @@ func (cr *connReader) Read(p []byte) (n int, err error) {
 	}
 	cr.inRead = true
 	cr.unlock()
-	n, err = cr.conn.rwc.Read(p)
+	n, err = cr.conn.rwc.Read(p) // 读到了 buffer 里面，
 
 	cr.lock()
 	cr.inRead = false
@@ -809,7 +823,7 @@ func (cr *connReader) Read(p []byte) (n int, err error) {
 	cr.remain -= int64(n)
 	cr.unlock()
 
-	cr.cond.Broadcast()
+	cr.cond.Broadcast() // 通知进行 abort 的 goroutine
 	return n, err
 }
 
@@ -1005,7 +1019,7 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 	 * ---> net.netFD.ReadLine()
 	 * ---> poll.FD.ReadLine()
 	 */
-	req, err := readRequest(c.bufr)
+	req, err := readRequest(c.bufr) // request-line、Header 完成了接收 + 解析；http body 则是完成了 Reader 的封装
 	if err != nil {
 		if c.r.hitReadLimit() {
 			return nil, errTooLarge
@@ -1693,10 +1707,13 @@ func (w *response) finishRequest() {
 	w.cw.close()
 	w.conn.bufw.Flush() // 通过 socket fd 正式把数据给内核
 
-	w.conn.r.abortPendingRead()
+	// 因为下一个循环的开始也是要读 request 的，所以 background goroutine 就不需要了
+	// 等待数据接收的这件事，就交由下一个循环的 Read 来完成
+	w.conn.r.abortPendingRead() // 终止 backfround read 的 goroutine
 
 	// Close the body (regardless of w.closeAfterReply) so we can
 	// re-use its bufio.Reader later safely.
+	// 清除没有用上的 request body
 	w.reqBody.Close()
 
 	if w.req.MultipartForm != nil {
@@ -1942,14 +1959,14 @@ func (c *conn) serve(ctx context.Context) {
 	defer cancelCtx()
 
 	// 裹上 buffer
-	c.r = &connReader{conn: c}
-	c.bufr = newBufioReader(c.r)
+	c.r = &connReader{conn: c}   // 通过 c.r，就可以进行并发安全的读操作
+	c.bufr = newBufioReader(c.r) // 通过 c.bufr 就可以进行并发安全的 read buffer 操作
 	c.bufw = newBufioWriterSize(checkConnErrorWriter{c}, 4<<10)
 
 	/* 读写循环，得益于 http 的 request-respond 设计，所以并不需要分别创建读写的 goroutine */
 	for {
-		/* block 等待 request，并且将请求按照 HTTP 协议进行解析 */
-		w, err := c.readRequest(ctx)
+		/* block 等待 request-line + Header，并且将请求按照 HTTP 协议进行解析 */
+		w, err := c.readRequest(ctx) // request-line + Header 已经完成处理，但是 body 还没有动过
 		if c.r.remain != c.server.initialReadLimitSize() {
 			// If we read any bytes off the wire, we're active.
 			c.setState(c.rwc, StateActive, runHooks)
@@ -2010,9 +2027,15 @@ func (c *conn) serve(ctx context.Context) {
 
 		c.curReq.Store(w) // 把 req 存起来，而且接受针对指针的并行访问、COW 修改
 
+		// 在后台并行等待并读取 body 数据
+		// w.conn.r 实际上就是并发安全的 http.conn.connReader
+		// w.conn.r.startBackgroundRead 等价于 http.conn.connReader.startBackgroundRead
+		// 对于同一个 conn 来说，永远只有这里启动一个 background goroutine 来读取数据
 		if requestBodyRemains(req.Body) {
+			// body 还没有接收完
 			registerOnHitEOF(req.Body, w.conn.r.startBackgroundRead)
 		} else {
+			// body 已经接收完了
 			w.conn.r.startBackgroundRead()
 		}
 
@@ -2038,7 +2061,7 @@ func (c *conn) serve(ctx context.Context) {
 		 * ----> http.ServeMux.match() 做 hash 查找
 		 * --> callbackFunction() 直接执行，然后返回这里
 		 */
-		serverHandler{c.server}.ServeHTTP(w, w.req)
+		serverHandler{c.server}.ServeHTTP(w, w.req) // 这时候 body 的数据有可能读完了，也有可能没有读完
 
 		// 框架代码并不需要理会：回什么。回的内容是什么，是调用者的事
 		// 只需要老老实实的把 w *http.Response 里面的内容按顺序组装成 http 报文，然后发出去就好
