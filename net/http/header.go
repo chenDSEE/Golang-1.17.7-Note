@@ -19,6 +19,9 @@ import (
 //
 // The keys should be in canonical form, as returned by
 // CanonicalHeaderKey.
+// net/http.Header 等价于 net/textproto.MIMEHeader，都是 map[string][]string
+// 所以 Header 的 Set/Add/Get/Del/Values method 实际上都是强制转换为 net/textproto.MIMEHeader
+// 再使用 net/textproto.MIMEHeader 的 method 的
 type Header map[string][]string
 
 // Add adds the key, value pair to the header.

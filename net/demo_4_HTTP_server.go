@@ -141,7 +141,7 @@ func requestDemoHandler(w http.ResponseWriter, r *http.Request) {
 //	param-1=value-2&param-3=456
 //
 // case 2:
-//  Issue by: curl  'http://localhost:8080/http-url-encoded' --data-urlencode "name=chelly" --data-urlencode "key=value" --data-urlencode "name=aimer"
+//  Issue by: curl 'http://localhost:8080/http-url-encoded' --data-urlencode "name=chelly" --data-urlencode "key=value" --data-urlencode "name=aimer"
 //      POST /http-url-encoded HTTP/1.1
 //      Host: localhost:8080
 //      User-Agent: curl/7.83.1

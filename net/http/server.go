@@ -92,6 +92,7 @@ type Handler interface {
 //
 // A ResponseWriter may not be used after the Handler.ServeHTTP method
 // has returned.
+// 对于 net/http 来说，这个就是 net/http.response
 type ResponseWriter interface {
 	// Header returns the header map that will be sent by
 	// WriteHeader. The Header map also is the mechanism with which
@@ -1166,7 +1167,7 @@ func relevantCaller() runtime.Frame {
 	return frame
 }
 
-// 设置状态码 + 把 Header flush 下去
+// 设置状态码 + 把 Header 设置好，放到 net/http.response 里面（还没有真正发出去）
 // code 实际上是：这个 http response 返回什么状态码？
 // StatusOK 就是 HTTP 200 OK
 func (w *response) WriteHeader(code int) {
@@ -1186,7 +1187,9 @@ func (w *response) WriteHeader(code int) {
 	w.status = code            // 暂时记录起来，晚点由 chunkWriter.Write() 负责编码进去 conn.bufw 里面
 
 	if w.calledHeader && w.cw.header == nil {
-		// TODO: 为什么要 clone 进去 cw ？
+		// 为什么要 clone 进去 cw ？ 因为 chunked 传输，有些 Header 是不能出现的，这时候要删除掉
+		// 而且通常是刷写 body 或者是 status code 的时候，才进行一个 deep copy
+		// 个人感觉当不选择 chunked 的时候，可以直接避免这个 deep copy
 		// 确实，http.ResponseWriter.WriteHeader() 跟 http.ResponseWriter.Header().Add() 有顺序问题
 		w.cw.header = w.handlerHeader.Clone()
 	}

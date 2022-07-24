@@ -33,6 +33,7 @@ var respExcludeHeader = map[string]bool{
 // the response headers have been received. The response body
 // is streamed on demand as the Body field is read.
 type Response struct {
+	/* http status line */
 	Status     string // e.g. "200 OK"
 	StatusCode int    // e.g. 200
 	Proto      string // e.g. "HTTP/1.0"
@@ -242,6 +243,8 @@ func (r *Response) ProtoAtLeast(major, minor int) bool {
 //  Header, values for non-canonical keys will have unpredictable behavior
 //
 // The Response Body is closed after it is sent.
+// 既然开始通过 Response.Write() 开始对外刷写 body 了，那前面的 status-line + Header 要首先刷写出去
+// 如果一些必要的 status-line、Header 没有填好，那就会自动帮你填写
 func (r *Response) Write(w io.Writer) error {
 	// Status line
 	text := r.Status
