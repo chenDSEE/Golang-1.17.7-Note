@@ -1034,8 +1034,6 @@ func (fd *FD) Accept() (int, syscall.Sockaddr, string, error) {
 
 
 
-
-
 ## demo
 
 ### HTTP server
@@ -2962,8 +2960,12 @@ func (w *response) finishRequest() {
 - 通常是先把数据写到 `http.response.w` 这个 `bufio.Writer` 里面。然后通过这个 `bufio.Writer` 里面的编码器 `http.chunkWriter`(`http.response.cw`) 进行编码，并写入到 socket 的 `bufio.Writer` 里面（`http.response.conn.bufw`）
 - HTTP 报文的编码会有两个触发路径：
   - 报文不长：等注入的 `http.ServeHTTP()` 完成之后，在主动调用 `http.response.finishRequest()` 进行编码，然后通过 socker fd 发送出去
-  - 报文很长，长到 bufio 已经装不下了：
-
+    - status-line 由 `net/http.chunkWriter` 负责刷写到 `net/http.response.conn.bufw`；
+    - Header 先由 `net/http.response.Header` 暂时保存，再由 `net/http.chunkWriter.Write()` 调用 `net/http.extraHeader.Write()` 负责刷写到 `net/http.response.conn.bufw` 这个 bufio 的 buf 里；
+    - Body 先由 `net/http.response.w` 这个 bufio 暂时保存，最后由 bufio  调用 `net/http.chunkWriter.Write()` 负责刷写到 `net/http.response.conn.bufw`
+  - Body 的数据很长，长到 bufio 已经装不下了：
+    - 那么就会导致 `net/http.response.w` 这个 bufio 使用 `Flush()`, 进而调用了 `net/http.chunkWriter.Write()`, 先将 status-line + Header 刷写到 `net/http.response.conn.bufw`，再把 Body 刷写出去
+  
 - HTTP Response = status-line + Header + '\r\n' + body
   - status-line: `net/http.Response.WriteHeader(statusCode)`
   - Header: `net/http.ResponseWrite.Header().Add(key, value)`
@@ -3471,6 +3473,7 @@ type Response struct {
 - background goroutine 是预先开始接收下一个 request 的数据。启动一个 background goroutine 的前提是：当前的 request 的 body 部分已经读取完毕了
 - 因为每一个 request 的循环开头，都会有 read，所以在完成了一个 request-response 的时候，或者是即将开始下一个 request 之前，需要把这个 background goroutine 给停掉。避免影响下一轮的 request-response
 - 同时 `finishRequest()` 还会把当前 request 的 body 给全部扔掉，避免影响下一个 request 的 http 分包
+- ==net/http 接收并解析完 request-line + Header 之后，才会交给 router 进行路由转发的==
 
 ## 当 HTTP 被分割为多个 TCP 怎么办？
 
@@ -3564,6 +3567,51 @@ drop 掉，不然会影响下一次使用整个 `http.conn` 的，因为底层 T
 
 
 ### 提前 cancel 的话，cancel 后往 conn 写入的数据怎么办？
+
+
+
+
+
+
+
+
+
+
+
+## gracefully shuts down
+
+- Shutdown 不会强行终止任何 connection
+
+**work flow：**
+
+1. closing all open listeners
+2. call register shutdown function
+3. closing all idle connections
+4. waiting indefinitely for connections to return to idle
+5. shut down the idle connections
+
+
+
+### server 怎么发出信号？
+
+`srv.inShutdown.setTrue()`
+
+然后由每个 connection 的 goroutine 在代码处理流程中进行主动检测
+
+
+
+### connection 怎么处理 shutdown ？
+
+- 每一个 connection 都会在自己的读写循环（`net/http.conn.serve()`）里面看看 server 是不是被 shutdown 了（`if !w.conn.server.doKeepAlives()`），是的话，那就退出循环
+- 要是 connection block 在 `read()` 的话，那其实直接退出也没有关系，因为浏览器压根没有觉得自己的请求被接收了，到时候浏览器那边直接重试就好（虽然是会无限等待，但实际上这种情况直接关闭也是可以的）
+  - 这种情况，当前 connection 是被认为 StateIdle 状态的
+- 在 `write()` 的时候，检查到了 server 发出的 shutdown，所以在返回 response 的时候，直接带上一个 connection: close 的 Header，通知浏览器。然后再自己的读写循环（`net/http.conn.serve()`）里，`if !w.shouldReuseConnection()` 直接退出循环
+
+
+
+正常情况下，connection 将会在 `net/http.conn.serve()` 退出前，通过 defer 来运行 `c.close()`，`c.setState(c.rwc, StateClosed, runHooks)`，将剩余的数据刷写出去，以及把自己这个 connection 从 server 中删除（`delete(s.activeConn, c)`）
+
+
 
 
 

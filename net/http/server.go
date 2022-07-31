@@ -343,6 +343,7 @@ func (c *conn) hijackLocked() (rwc net.Conn, buf *bufio.ReadWriter, err error) {
 // but otherwise it's somewhat arbitrary.
 const bufferBeforeChunkingSize = 2048
 
+// NOTE: chunkWriter 不仅仅只为 chunked 进行数据格式化，定长 body 也会通过 chunkWriter 进行格式化的
 // chunkWriter 将会被 bufio 包裹，变成 response.w
 // chunkWriter writes to a response's conn buffer, and is the writer
 // wrapped by the response.w buffered writer.
@@ -363,6 +364,13 @@ type chunkWriter struct {
 	// at the time of res.writeHeader, if res.writeHeader is
 	// called and extra buffering is being done to calculate
 	// Content-Type and/or Content-Length.
+	// chunkWriter.Header 跟 response.Header 最大的区别是:
+	// 只有 response.WriterHeader() 的时候，也就是用户 ServeHTTP() 的时候，调用了 response.WriterHeader()
+	// 设置 status-code 之后，才会把 response.Header 拷贝到 chunkWriter.Header 里面
+	// 因为一旦通过 response.WriterHeader() 设置 status code 也就意味着 Header 全部已经处理好了
+	// 所以所有 Header 就会被放进用于 HTTP 序列化的 chunkWriter 里面
+	// 哪怕你后面再怎么通过 net/http.ResponseHeader().Set() 改动，都不影响正常的序列化。
+	// 因为 HTTP 序列化的时候，只会使用 chunkWriter.Header
 	header Header
 
 	// wroteHeader tells whether the header's been written to "the
@@ -386,6 +394,7 @@ func (cw *chunkWriter) Write(p []byte) (n int, err error) {
 	if !cw.wroteHeader {
 		/* 将 Header 数据进行格式化 */
 		// 并通过 cw.res.conn.bufw 刷到 http.response.conn.bufw 里面
+		// p 仅仅是为了 ContentLength, 而且大部分场合都用不上
 		cw.writeHeader(p)
 	}
 	if cw.res.req.Method == "HEAD" {
@@ -463,15 +472,15 @@ type response struct {
 
 	// w 是裹上 bufio 的 cw, 而 cw 则是一个转接到 http.conn 的桥梁，以及格式转换器
 	// net.http.response.w = newBufioWriterSize(&cw)
-	// cw 并没有 socket fd，仅仅是通过指针的方式，去访问原本 http.conn 中的 socket
+	// cw 并没有 socket fd，仅仅是通过指针的方式，去访问原本 http.conn 中的 socket（cw.res.conn.bufw.Write(p)）
 	w  *bufio.Writer // buffers output in chunks to chunkWriter，业务层 buffer
-	cw chunkWriter   // 协议序列化 Writer
+	cw chunkWriter   // 协议序列化 Writer（定长、不定长都是这个）
 
 	// handlerHeader is the Header that Handlers get access to,
 	// which may be retained and mutated even after WriteHeader.
 	// handlerHeader is copied into cw.header at WriteHeader
 	// time, and privately mutated thereafter.
-	handlerHeader Header // 业务层 buffer
+	handlerHeader Header // 业务层 buffer, 对外刷写前都会暂时保留在这里
 	calledHeader  bool // handler accessed handlerHeader via Header
 
 	written       int64 // number of bytes written in body
@@ -1233,6 +1242,7 @@ var (
 // This method has a value receiver, despite the somewhat large size
 // of h, because it prevents an allocation. The escape analysis isn't
 // smart enough to realize this function doesn't mutate h.
+// 将所有 Header 按照 HTTP 协议进行序列化，然后往 socket 所在的 bufio 写
 // 非常朴素的字符串写入
 func (h extraHeader) Write(w *bufio.Writer) {
 	// w = http.response.conn.bufw
@@ -1663,6 +1673,7 @@ func (w *response) write(lenData int, dataB []byte, dataS string) (n int, err er
 	}
 
 	if !w.wroteHeader {
+		// 默认设置 status code: 200 OK
 		w.WriteHeader(StatusOK)
 	}
 	if lenData == 0 {
@@ -1677,9 +1688,13 @@ func (w *response) write(lenData int, dataB []byte, dataS string) (n int, err er
 		return 0, ErrContentLength
 	}
 	if dataB != nil {
-		// 先向 bufio.writer 中的 buf 写入数据
-		// 当 buffer 满了之后，
-		// 在通过 net.response.chunkWriter.Write() 中的 cw.res.conn.bufw.Write()
+		// w.w 是什么？过了 bufio 的 chunkWriter
+		// 所以 ServeHTTP() 对 ResponseWriter.Write() 会这样：
+		// 1. 先向 bufio.writer 中的 buf 写入数据
+		// 2. 当 buffer 满了之后，通过 bufio.Writer.Flush() 通
+		//    过 bufio.Writer.wr.Write(buf) 把 buf 里面的数据，给到
+		//    net.response.chunkWriter.Write(buf)
+		// 3. 然后由 cw.res.conn.bufw.Write() 正式刷写出去
 		// 向 http socket 的 bufio 中的 buffer 写入
 		// NOTE: header 呢？在 net.http.chunkWriter.write() 最开头就帮你 flush 出去了
 		return w.w.Write(dataB) // net.response.bufio.writer
@@ -1838,6 +1853,7 @@ func (c *conn) setState(nc net.Conn, state ConnState, runHook bool) {
 	srv := c.server
 	switch state {
 	case StateNew:
+		// 为了后续 gracefully shuts down 服务
 		srv.trackConn(c, true)
 	case StateHijacked, StateClosed:
 		// 因为这个 net.http.conn 的生命周期已经不归这个 server 管理了
@@ -1967,6 +1983,10 @@ func (c *conn) serve(ctx context.Context) {
 	c.bufw = newBufioWriterSize(checkConnErrorWriter{c}, 4<<10)
 
 	/* 读写循环，得益于 http 的 request-respond 设计，所以并不需要分别创建读写的 goroutine */
+	// conn 状态转换（c.setState）：
+	// 1. block read 为 StateIdle;
+	// 2. 只要读到了数据，那就是 StateActive 需要进行请求处理
+	// 3. 当 connect 不需要 net/http 进行管理的话，就是 StateHijacked
 	for {
 		/* block 等待 request-line + Header，并且将请求按照 HTTP 协议进行解析 */
 		w, err := c.readRequest(ctx) // request-line + Header 已经完成处理，但是 body 还没有动过
@@ -2086,6 +2106,7 @@ func (c *conn) serve(ctx context.Context) {
 		c.curReq.Store((*response)(nil))
 
 		if !w.conn.server.doKeepAlives() {
+			// 接收 net/http.server.Shutdown() 的终止信号
 			// We're in shutdown mode. We might've replied
 			// to the user without "Connection: close" and
 			// they might think they can send another
@@ -2856,6 +2877,13 @@ func (srv *Server) Close() error {
 // exercise for the reader.
 const shutdownPollIntervalMax = 500 * time.Millisecond
 
+// Shutdown 不会强行终止任何 connection
+// work flow:
+// 1. closing all open listeners
+// 2. closing all idle connections
+// 3. waiting indefinitely for connections to return to idle
+// 4. shut down the idle connections
+//
 // Shutdown gracefully shuts down the server without interrupting any
 // active connections. Shutdown works by first closing all open
 // listeners, then closing all idle connections, and then waiting
@@ -2880,10 +2908,13 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 	srv.inShutdown.setTrue()
 
 	srv.mu.Lock()
+
+	/* step 1: closing all open listeners */
 	lnerr := srv.closeListenersLocked()
 	srv.closeDoneChanLocked()
 	for _, f := range srv.onShutdown {
-		go f()
+		// 我们可以在这里注入一些默认的行为，比如让 handler 尽快退出
+		go f() // call function registered in RegisterOnShutdown()
 	}
 	srv.mu.Unlock()
 
@@ -2891,7 +2922,7 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 	nextPollInterval := func() time.Duration {
 		// Add 10% jitter.
 		interval := pollIntervalBase + time.Duration(rand.Intn(int(pollIntervalBase/10)))
-		// Double and clamp for next time.
+		// Double and clamp for next time. 类似于指数退避的思想
 		pollIntervalBase *= 2
 		if pollIntervalBase > shutdownPollIntervalMax {
 			pollIntervalBase = shutdownPollIntervalMax
@@ -2899,16 +2930,21 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 		return interval
 	}
 
+	// 定时监控异常
 	timer := time.NewTimer(nextPollInterval())
 	defer timer.Stop()
-	for {
+	for { // 无限循环，直到全部 connection goroutine 退出（发生了 error 除外）
+		// 尝试清除 idle connection
 		if srv.closeIdleConns() && srv.numListeners() == 0 {
+			// 全部 connection goroutine 清理完毕，可以退出
 			return lnerr
 		}
 		select {
 		case <-ctx.Done():
+			// 发生了 ctx 的取消行为
 			return ctx.Err()
 		case <-timer.C:
+			// 超时，重新设置下一次尝试的时间
 			timer.Reset(nextPollInterval())
 		}
 	}
@@ -2931,13 +2967,14 @@ func (s *Server) numListeners() int {
 	return len(s.listeners)
 }
 
+// 尝试清除 idle connection
 // closeIdleConns closes all idle connections and reports whether the
 // server is quiescent.
 func (s *Server) closeIdleConns() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	quiescent := true
-	for c := range s.activeConn {
+	quiescent := true // 用来标记是否所有的连接都已经关闭
+	for c := range s.activeConn { // 所有 net/http.conn 都会被登记进来这里
 		st, unixSec := c.getState()
 		// Issue 22682: treat StateNew connections as if
 		// they're idle if we haven't read the first request's
@@ -2951,7 +2988,7 @@ func (s *Server) closeIdleConns() bool {
 			quiescent = false
 			continue
 		}
-		c.rwc.Close()
+		c.rwc.Close() // *net.TCPConn.Close()
 		delete(s.activeConn, c)
 	}
 	return quiescent
@@ -3288,6 +3325,7 @@ func (s *Server) trackListener(ln *net.Listener, add bool) bool {
 	return true
 }
 
+// 为了后续 gracefully shuts down 服务
 func (s *Server) trackConn(c *conn, add bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
