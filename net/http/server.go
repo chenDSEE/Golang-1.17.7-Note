@@ -3067,6 +3067,8 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	handler := sh.srv.Handler // 就是传进来的 http.ServeMux, server 启动前组测的路由表
 	if handler == nil {
 		// 没有的话，使用默认的 DefaultServeMux
+		// 因为在通常情况下我们可能这样写，所以这个默认替补就很有用
+		// http.ListenAndServe(":8080", nil)
 		handler = DefaultServeMux
 	}
 	if req.RequestURI == "*" && req.Method == "OPTIONS" {

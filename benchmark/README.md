@@ -3,7 +3,7 @@
 从快到慢排列：array ≈ switch-case > slice >> map (基于 go1.17.7)
 - map 比其他的慢了一个数量级
 - 不嫌麻烦的话，直接用 switch case 是比较好的，因为还可以处理异常输入
-  - 显然，array 的方式代码是最简单的，而且直接增加枚举值就好了，但是没有异常输入的处理能力，一场输入直接靠 panic
+  - 显然，array 的方式代码是最简单的，而且直接增加枚举值就好了，但是没有异常输入的处理能力，异常输入直接靠 panic
 ```bash
 [root@LC benchmark]# go version
 go version go1.17.7 linux/amd64

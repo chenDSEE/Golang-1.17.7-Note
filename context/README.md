@@ -27,6 +27,76 @@
 
 
 
+
+
+# 为什么 `Context` 能够被这么多地方使用？
+
+好用！大家用起来感觉非常的爽快。这是最为简单直接的答案。
+
+那么爽在哪里呢？
+
+- 这是一个很好的抽象。因为 `Context` 的生命周期贯穿了 server 处理 request，回复 response 的整个过程。这也就意味着，在这个过程中必须的关键信息全部放到这个 `Context` 里面就好了，需要的时候再从 `Context` 中去拿
+- 为优雅终止、提前取消提供的 cancel 的能力，有利于 goroutine 的生命周期管理（毕竟没有 cancel 的话，有些并发出去的 goroutine 就不能被取消，会造成资源上的浪费，甚至是 goroutine 的泄露）
+  - 还提供的定时 cancel 的能力
+- 能够让标准库、自定义的 `Context`、第三方库的 `Context` 无缝的混合使用
+  - 标准库的 `context` 包除了提供 `Context` 这个 interface 抽象（接口约定）之外，还提供了程序员操作 `context` 的 public function 作为标准的 API，尽可能让每一个使用 Context 的人都能够采用相同的 API 去操作 `Context`
+  - 其实，`context` 的 public function 是作为一套 `Context` 框架存在的！你想想，所有人都只推荐使用 `context` 包提供的 public function 去操作 `Context` interface，而 public function 返回的参数、接收的参数也是 `Context` interface。这造成了什么结果？第三方库自己创建的 `Context`  object 只要满足 `Context` interface 的要求，就可以传出去，跨越不同的 package，无论是第三方 package，还是标准库的
+  - 看下面的这个例子：
+
+```go
+package p1
+
+type ctx1 struct {
+    .....
+}
+
+func inputData(ctx1, data) context.Context {
+    return context.WithValue(ctx1, key, data)
+}
+
+func getData(context.Context) data {
+    // 即便跨越了不同的 package，依然能够顺利拿回相应的数据
+    return context.Value(ctx1, key)
+}
+```
+
+```go
+package p2
+
+type ctx2 struct {
+    .....
+}
+
+func inputData(ctx2, data) context.Context {
+    return context.WithValue(ctx2, key, data)
+}
+
+func getData(context.Context) data {
+    return context.Value(ctx2, key)
+}
+```
+
+
+
+```go
+package main
+
+import p1
+import p2
+
+func main() {
+    ctx := p1.inputData(context.background(), data)
+    ctx = p2.inputData(ctx, data)
+    data = p1.getData(ctx)
+}
+```
+
+
+
+
+
+
+
 # interface
 
 ## Context
