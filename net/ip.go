@@ -49,6 +49,34 @@ type IPNet struct {
 	Mask IPMask // network mask
 }
 
+// Q&A(DONE): 为什么 IPv4 的 16 byte form 是 {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, d, d, d, d} 的形式？
+// 这其实是一种兼容方案，详细的 RFC 约定请看下面：
+// RFC4291, 2.2.Text Representation of Addresses:
+// An alternative form that is sometimes more convenient when dealing
+// with a mixed environment of IPv4 and IPv6 nodes is
+// x:x:x:x:x:x:d.d.d.d, where the 'x's are the hexadecimal values of
+// the six high-order 16-bit pieces of the address, and the 'd's are
+// the decimal values of the four low-order 8-bit pieces of the
+// address (standard IPv4 representation).  Examples:
+// 0:0:0:0:0:0:13.1.68.3
+//  0:0:0:0:0:FFFF:129.144.52.38
+// {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, d, d, d, d}
+// or in compressed form:
+// ::13.1.68.3
+// ::FFFF:129.144.52.38
+//
+// RFC4291, 2.5.5.2.IPv4-Mapped IPv6 Address
+// A second type of IPv6 address that holds an embedded IPv4 address is
+// defined.  This address type is used to represent the addresses of
+// IPv4 nodes as IPv6 addresses.  The format of the "IPv4-mapped IPv6
+// address" is as follows:
+// |                80 bits               | 16 |      32 bits        |
+// +--------------------------------------+--------------------------+
+// |0000..............................0000|FFFF|    IPv4 address     |
+// +--------------------------------------+----+---------------------+
+// See [RFC4038] for background on the usage of the "IPv4-mapped IPv6
+// address".
+//
 // IPv4 returns the IP address (in 16-byte form) of the
 // IPv4 address a.b.c.d.
 func IPv4(a, b, c, d byte) IP {
