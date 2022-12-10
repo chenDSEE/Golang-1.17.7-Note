@@ -1,10 +1,9 @@
-package benchmark
+package main
 
 import "testing"
 
-
-/* result: array = switch-case > slice > map
-[root@LC benchmark]# go test -v -bench='Benchmark_Access.*' -cpu=1 -benchtime=5s
+/* result: (fast)    array = switch-case > slice > map     (slow)
+[root@LC benchmark]# go test *.go -v -bench='Benchmark_Access.*' -cpu=1 -benchtime=5s
 goos: linux
 goarch: amd64
 pkg: benchmark
@@ -26,7 +25,7 @@ ok  	benchmark	8.457s
 
 const smallSize = 16
 
-// go test -v -bench='Benchmark_AccessStackArray_SmallSize' -cpu=1 -benchtime=5s
+// go test *.go -v -bench='Benchmark_AccessStackArray_SmallSize' -cpu=1 -benchtime=5s
 func Benchmark_AccessStackArray_SmallSize(b *testing.B) {
 	var tmp string
 	var array [smallSize]string
@@ -43,7 +42,7 @@ func Benchmark_AccessStackArray_SmallSize(b *testing.B) {
 	_ = tmp
 }
 
-// go test -v -bench='Benchmark_AccessArray_SmallSize' -cpu=1 -benchtime=5s
+// go test *.go -v -bench='Benchmark_AccessArray_SmallSize' -cpu=1 -benchtime=5s
 func Benchmark_AccessArray_SmallSize(b *testing.B) {
 	var tmp string
 	var array *[smallSize]string = new([smallSize]string) // slice and map also in heap
@@ -60,7 +59,7 @@ func Benchmark_AccessArray_SmallSize(b *testing.B) {
 	_ = tmp
 }
 
-// go test -v -bench='Benchmark_AccessSlice_SmallSize' -cpu=1 -benchtime=5s
+// go test *.go -v -bench='Benchmark_AccessSlice_SmallSize' -cpu=1 -benchtime=5s
 func Benchmark_AccessSlice_SmallSize(b *testing.B) {
 	var tmp string
 	slice := make([]string, 0, 10)
@@ -77,7 +76,7 @@ func Benchmark_AccessSlice_SmallSize(b *testing.B) {
 	_ = tmp
 }
 
-// go test -v -bench='Benchmark_AccessMap_SmallSize' -cpu=1 -benchtime=5s
+// go test *.go -v -bench='Benchmark_AccessMap_SmallSize' -cpu=1 -benchtime=5s
 func Benchmark_AccessMap_SmallSize(b *testing.B) {
 	var tmp string
 	Map := make(map[int]string, smallSize)
@@ -95,7 +94,7 @@ func Benchmark_AccessMap_SmallSize(b *testing.B) {
 	_ = tmp
 }
 
-// go test -v -bench='Benchmark_AccessSwitchCase_SmallSize' -cpu=1 -benchtime=5s
+// go test *.go -v -bench='Benchmark_AccessSwitchCase_SmallSize' -cpu=1 -benchtime=5s
 func Benchmark_AccessSwitchCase_SmallSize(b *testing.B) {
 	var tmp string
 

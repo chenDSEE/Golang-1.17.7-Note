@@ -281,6 +281,22 @@ type WriterTo interface {
 
 # 具体实现 package
 
+> - strings package 是为了 string 提供基本操作 API（包括 `io.Reader` 的快速转换）
+> - bytes package 是为了 []bytes 提供基本操作 API（包括 `io.Reader` 的快速转换）
+
+## 常见 API 含义
+
+- true or false 的定性判断：
+  - `Contains()` 是否包含
+  - `ContainsAny()` 两个字符串是否存在任何的交集
+  - `HasPrefix()`, `HasSuffix()` 前后缀判断
+- 定位查找：
+  - `IndexXXXX()` 从前面开始查找；`LastIndexXXXX()` 从后向前查找
+- `Equal()` 是区分大小写的比较函数；`EqualFold()` 是不区分大小写的比较函数
+- `TrimXXXX()` 修剪原本的数据
+
+
+
 ## bytes.Buffer
 
 ```go
